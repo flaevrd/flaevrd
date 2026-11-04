@@ -8,7 +8,7 @@ import re
 from ..config import settings
 from ..engine.normalize import clean_discogs_name, role_from_text
 from ..http import Http
-from .base import Candidate, ContactRec, FactRec, NotConfigured, PersonRef, ProfileData, ReleaseRef, TrackRec
+from .base import auth_header, Candidate, ContactRec, FactRec, NotConfigured, PersonRef, ProfileData, ReleaseRef, TrackRec
 from .links import normalize_url, provider_ids, social_type
 
 API = "https://api.discogs.com"
@@ -80,7 +80,7 @@ class Discogs:
         if not self.configured():
             raise NotConfigured("DISCOGS_TOKEN")
         r = await self.http.get(f"{API}{path}", params=params,
-                                headers={"Authorization": f"Discogs token={settings.discogs_token}"})
+                                headers=auth_header("Discogs token=", settings.discogs_token))
         return r.json()
 
     async def search(self, q: str, kind: str, limit: int = 5) -> list[Candidate]:

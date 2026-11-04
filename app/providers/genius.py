@@ -9,7 +9,7 @@ from __future__ import annotations
 from ..config import settings
 from ..engine.normalize import is_video_credit, norm_name, norm_title, role_from_text
 from ..http import Http
-from .base import Candidate, ContactRec, FactRec, NotConfigured, PersonRef, ProfileData, ReleaseRef, TrackRec
+from .base import auth_header, Candidate, ContactRec, FactRec, NotConfigured, PersonRef, ProfileData, ReleaseRef, TrackRec
 
 API = "https://api.genius.com"
 NAME = "genius"
@@ -36,7 +36,7 @@ class Genius:
         if not self.configured():
             raise NotConfigured("GENIUS_ACCESS_TOKEN")
         r = await self.http.get(f"{API}{path}", params=params,
-                                headers={"Authorization": f"Bearer {settings.genius_token}"})
+                                headers=auth_header("Bearer ", settings.genius_token))
         return r.json().get("response", {})
 
     async def search(self, q: str) -> list[dict]:

@@ -109,3 +109,13 @@ class ProfileData:
     links: dict[str, str] = field(default_factory=dict)      # provider -> external id discovered via cross-links
     websites: list[str] = field(default_factory=list)       # official homepages
     unavailable: dict[str, str] = field(default_factory=dict)
+
+
+INJECTED = "injected"
+
+
+def auth_header(prefix: str, token: str) -> dict:
+    """Authorization header for a provider token. The value 'injected' means the token is held by
+    the environment's network proxy (a cloud "network secret"), which adds the header itself, so
+    the app sends none and never sees the key."""
+    return {} if token == INJECTED else {"Authorization": prefix + token}
