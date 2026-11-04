@@ -167,3 +167,31 @@ def test_website_contacts():
     assert any(c.contact_type == "instagram" for c in found)
     assert all(c.status == "verified" for c in found)
     assert not any("2x.png" in c.value for c in found)
+
+
+def test_contact_dedup_across_sources():
+    from app.engine.profile import group_contacts
+    from app.providers.links import contact_key
+    assert contact_key("x", "https://twitter.com/artista") == contact_key("x", "https://x.com/ArtistA/")
+    assert contact_key("youtube", "https://www.youtube.com/channel/UCx/videos") == contact_key("youtube", "https://youtube.com/channel/UCx")
+    rows = [
+        {"contact_type": "x", "value": "https://twitter.com/artista", "status": "publicly_listed",
+         "provider": "musicbrainz", "url": "https://mb/a", "last_checked_at": "2026-01-01"},
+        {"contact_type": "x", "value": "https://x.com/artista", "status": "verified",
+         "provider": "website", "url": "https://artista.example", "last_checked_at": "2026-01-02"},
+    ]
+    out = group_contacts(rows)
+    assert len(out) == 1
+    assert out[0]["status"] == "verified" and out[0]["value"] == "https://x.com/artista"
+    assert [s["provider"] for s in out[0]["sources"]] == ["website", "musicbrainz"]
+
+
+def test_original_recording_ranks_first():
+    from app.providers.musicbrainz import recording_quality, release_rank
+    official_album = {"status": "Official", "date": "2017-04-14", "release-group": {"primary-type": "Album"}}
+    bootleg_remix = {"status": "Bootleg", "date": "2023", "release-group": {"primary-type": "Album", "secondary-types": ["Remix"]}}
+    live = {"disambiguation": "live, 2024: Venue X", "releases": [bootleg_remix]}
+    original = {"disambiguation": "", "releases": [official_album, official_album]}
+    assert recording_quality(original) > recording_quality(live)
+    comp = {"status": "Official", "date": "2016", "release-group": {"primary-type": "Album", "secondary-types": ["Compilation"]}}
+    assert sorted([comp, bootleg_remix, official_album], key=release_rank)[0] is official_album

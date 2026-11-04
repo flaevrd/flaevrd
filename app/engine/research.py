@@ -18,6 +18,7 @@ from ..providers.musicbrainz import MusicBrainz, split_query
 from ..providers.website import WebsiteContacts
 from ..providers.wikidata import Wikidata
 from . import network
+from .profile import group_contacts
 from .normalize import ROLE_TO_GROUP, norm_name, norm_title
 from .store import Store
 
@@ -588,10 +589,11 @@ class Researcher:
 
         contacts = []
         for e in [root] + [d["id"] for d in direct[:12]]:
-            for c in self.db.q("SELECT c.contact_type, c.value, c.purpose, c.status, c.last_checked_at, s.url, s.provider "
-                               "FROM contacts c JOIN sources s ON s.id=c.source_id WHERE c.entity_id=? "
-                               "ORDER BY CASE c.status WHEN 'verified' THEN 0 WHEN 'publicly_listed' THEN 1 ELSE 2 END", (e,)):
-                contacts.append({"entity_id": e, "name": s_all.entities.get(e, {}).get("name"), **dict(c)})
+            rows = [dict(c) for c in self.db.q(
+                "SELECT c.contact_type, c.value, c.purpose, c.context, c.status, c.last_checked_at, s.url, s.provider, "
+                "s.description AS source_description FROM contacts c JOIN sources s ON s.id=c.source_id WHERE c.entity_id=?", (e,))]
+            for g in group_contacts(rows):
+                contacts.append({"entity_id": e, "name": s_all.entities.get(e, {}).get("name"), **g})
 
         sources = {}
         for t in list(s_all.sources.values()):

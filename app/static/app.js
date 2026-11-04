@@ -420,7 +420,7 @@ function tabContacts(r) {
     if (!e) return `<tr><td><a class="name" href="#/p/${id}">${esc(name)}</a></td><td colspan="6">${status("unavailable")} <span class="faint">Not profiled yet or nothing published — open the profile and press “Refresh profile”.</span></td></tr>`;
     return e.list.map((c, i) => `<tr>${i === 0 ? `<td rowspan="${e.list.length}"><a class="name" href="#/p/${id}">${esc(name)}</a></td>` : ""}
       <td class="mono">${esc(c.contact_type)}</td><td>${contactValue(c)}</td><td class="muted">${esc(c.purpose || "")}</td><td>${status(c.status)}</td>
-      <td class="prov"><a href="${url(c.url)}" target="_blank" rel="noopener">${esc(c.provider)}</a></td><td class="mono faint">${esc(day(c.last_checked_at))}</td></tr>`).join("");
+      <td class="prov">${c.sources.map((s) => `<a href="${url(s.url)}" target="_blank" rel="noopener">${esc(s.provider)}</a>`).join(" · ")}</td><td class="mono faint">${esc(day(c.last_checked_at))}</td></tr>`).join("");
   }).join("")}</tbody></table></div>`;
 }
 

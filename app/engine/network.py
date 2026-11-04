@@ -164,9 +164,10 @@ def describe_direct(s: Scope, root: int, other: int, sc: dict) -> tuple[str, str
     elif r_roles.get("featured_artist") and o_roles.get("main_artist"):
         rtype = "Featured artist"
     elif ROLE_TO_GROUP.get(o_roles.most_common(1)[0][0]) == "business":
-        rtype = "Shared label" if o_roles.get("label") else "Business connection"
+        # A label/publisher on the searched person's own releases: their label, not a "shared" one.
+        rtype = "Label" if o_roles.get("label") else "Publisher" if o_roles.get("publisher") else "Business connection"
     elif o_roles.get("studio"):
-        rtype = "Studio connection"
+        rtype = "Recording studio"
     else:
         rtype = "Direct collaboration"
     titles = ", ".join(f"“{e['title']}”" for e in sc["evidence"][:4]) + (" …" if n > 4 else "")
@@ -190,8 +191,14 @@ def direct_network(s: Scope, root: int) -> list[dict]:
         roles = entity_roles(s, o, {e["track_id"] for e in sc["evidence"]})
         out.append({**s.entities[o], "degree": 1, "relationship": rtype, "summary": text,
                     "roles": dict(roles), "group": main_group(roles), **sc})
-    out.sort(key=lambda x: (-x["strength"], x["name"]))
+    out.sort(key=people_first)
     return out
+
+
+def people_first(x: dict) -> tuple:
+    """Rank people and groups above labels, publishers and studios: the goal is finding people to
+    contact. Business entities stay in the list (and in the graph), just after the people."""
+    return (0 if x["type"] in PERSONLIKE else 1, -x["strength"], -x.get("path_count", 0), x["name"])
 
 
 def second_degree(s: Scope, root: int, direct: list[dict], limit_paths: int = 4) -> list[dict]:
@@ -221,7 +228,12 @@ def second_degree(s: Scope, root: int, direct: list[dict], limit_paths: int = 4)
             y_roles = entity_roles(s, y, ytids)
             weight = 0.5 if via["type"] in ("label", "studio") else 1.0
             g1, g2 = main_group(v_roles_r), main_group(v_roles_y)
-            if via["type"] == "label":
+            ytype = s.entities[y].get("type")
+            if ytype == "label":
+                ptype = "Label connection"
+            elif ytype == "studio":
+                ptype = "Studio connection"
+            elif via["type"] == "label":
                 ptype = "Shared label"
             elif via["type"] == "studio":
                 ptype = "Studio connection"
@@ -253,7 +265,7 @@ def second_degree(s: Scope, root: int, direct: list[dict], limit_paths: int = 4)
                     "relationship": paths[0]["type"],
                     "why": (f"Reached through {len(vias)} independent connection{'s' if len(vias) != 1 else ''}: "
                             + ", ".join(vias[:4]) + (" …" if len(vias) > 4 else ""))})
-    out.sort(key=lambda x: (-x["strength"], -x["path_count"], x["name"]))
+    out.sort(key=people_first)
     return out
 
 

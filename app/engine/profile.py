@@ -6,6 +6,7 @@ import json
 from collections import defaultdict
 
 from ..db import DB
+from ..providers.links import contact_key
 from .network import direct_network, entity_roles, load_scope, main_group
 from .normalize import ROLE_LABELS
 
@@ -62,20 +63,7 @@ def build_profile(db: DB, eid: int) -> dict | None:
     for r in db.q("SELECT c.*, s.provider, s.url AS source_url, s.description AS source_description FROM contacts c "
                   "JOIN sources s ON s.id=c.source_id WHERE c.entity_id=?", (eid,)):
         contacts.append(dict(r))
-    grouped: dict[tuple, dict] = {}
-    for c in contacts:
-        key = (c["contact_type"], c["value"].lower().rstrip("/"))
-        g = grouped.setdefault(key, {"contact_type": c["contact_type"], "value": c["value"], "purpose": c["purpose"],
-                                     "context": c["context"], "status": c["status"], "sources": []})
-        if STATUS_ORDER.get(c["status"], 9) < STATUS_ORDER.get(g["status"], 9):
-            g["status"] = c["status"]
-        g["purpose"] = g["purpose"] or c["purpose"]
-        g["sources"].append({"provider": c["provider"], "url": c["source_url"], "description": c["source_description"],
-                             "last_checked_at": c["last_checked_at"], "status": c["status"]})
-    contact_list = sorted(grouped.values(), key=lambda g: (STATUS_ORDER.get(g["status"], 9),
-                                                           CONTACT_ORDER.get(g["contact_type"], 9)))
-    for g in contact_list:
-        g["confidence"] = confidence(len({s["provider"] for s in g["sources"]}), g["status"] == "verified")
+    contact_list = group_contacts(contacts)
 
     metrics = defaultdict(list)
     for r in db.q("SELECT m.platform, m.metric, m.value, m.retrieved_at, s.url, s.description FROM metrics m "
@@ -123,3 +111,28 @@ def build_profile(db: DB, eid: int) -> dict | None:
         "collaborators": collaborators, "identity_questions": questions, "name_matched_ids": name_matches,
         "crm": crm_view,
     }
+
+
+def group_contacts(rows: list[dict]) -> list[dict]:
+    """One entry per distinct contact, listing every source that published it. The status is the
+    best status any source gives it; confidence rises with independent sources."""
+    grouped: dict[tuple, dict] = {}
+    for c in rows:
+        key = contact_key(c["contact_type"], c["value"])
+        g = grouped.setdefault(key, {"contact_type": c["contact_type"], "value": c["value"], "purpose": c.get("purpose"),
+                                     "context": c.get("context"), "status": c["status"], "sources": []})
+        if STATUS_ORDER.get(c["status"], 9) < STATUS_ORDER.get(g["status"], 9):
+            g["status"] = c["status"]
+            g["value"] = c["value"]
+        g["purpose"] = g["purpose"] or c.get("purpose")
+        g["context"] = g["context"] or c.get("context")
+        src = {"provider": c["provider"], "url": c.get("source_url") or c.get("url"),
+               "description": c.get("source_description"), "last_checked_at": c["last_checked_at"], "status": c["status"]}
+        if (src["provider"], src["url"]) not in {(s["provider"], s["url"]) for s in g["sources"]}:
+            g["sources"].append(src)
+    out = sorted(grouped.values(), key=lambda g: (STATUS_ORDER.get(g["status"], 9), CONTACT_ORDER.get(g["contact_type"], 9)))
+    for g in out:
+        g["sources"].sort(key=lambda s: STATUS_ORDER.get(s["status"], 9))
+        g["confidence"] = confidence(len({s["provider"] for s in g["sources"]}), g["status"] == "verified")
+        g["last_checked_at"] = max((s["last_checked_at"] or "") for s in g["sources"]) or None
+    return out

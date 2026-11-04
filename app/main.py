@@ -73,13 +73,13 @@ class ResearchIn(BaseModel):
 
 
 @app.post("/api/research")
-def start_research(body: ResearchIn):
+async def start_research(body: ResearchIn):
     sid = researcher().start(body.query, body.kind, body.provider, body.external_id, body.depth)
     return {"session_id": sid}
 
 
 @app.post("/api/people/{eid}/research")
-def research_from_person(eid: int, depth: int = 2):
+async def research_from_person(eid: int, depth: int = 2):
     """Start a new search from any discovered person."""
     store = researcher().store
     for p in ("musicbrainz", "genius", "discogs"):

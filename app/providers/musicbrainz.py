@@ -18,6 +18,12 @@ API = "https://musicbrainz.org/ws/2"
 WEB = "https://musicbrainz.org"
 NAME = "musicbrainz"
 
+# Release-group secondary types that rarely carry new production credits.
+SKIP_SECONDARY = {"Live", "Remix", "DJ-mix", "Interview", "Audiobook", "Audio drama", "Spokenword",
+                  "Demo", "Field recording"}
+# MusicBrainz placeholder label used for self-released records. Not a real label.
+NO_LABEL_ID = "157afde4-4bf5-4039-8ad2-5a15acc85176"
+
 _FEAT = re.compile(r"\b(feat\.?|ft\.?|featuring|with)\b", re.I)
 
 
@@ -75,18 +81,20 @@ class MusicBrainz:
     async def search_recordings(self, q: str, limit: int = 6) -> list[Candidate]:
         title, artist = split_query(q)
         query = f'recording:"{_lucene_escape(title)}"' + (f' AND artist:"{_lucene_escape(artist)}"' if artist else "")
-        data = await self._get("recording", {"query": query, "limit": limit * 2})
+        data = await self._get("recording", {"query": query, "limit": 25})
+        recs = sorted(data.get("recordings", []), key=lambda r: -(float(r.get("score", 0)) + recording_quality(r)))
         out, seen = [], set()
-        for r in data.get("recordings", []):
+        for r in recs:
             key = (r.get("title", "").lower(), credit_text(r.get("artist-credit")).lower())
             if key in seen:
                 continue
             seen.add(key)
-            rel = (r.get("releases") or [{}])[0].get("title")
+            rel = (sorted(r.get("releases") or [{}], key=release_rank) or [{}])[0].get("title")
             date = r.get("first-release-date") or ""
             out.append(Candidate("song", NAME, r["id"], r["title"],
                                  " · ".join(b for b in [credit_text(r.get("artist-credit")), rel, date[:4]] if b),
-                                 f"{WEB}/recording/{r['id']}", float(r.get("score", 0)), date[:4] or None))
+                                 f"{WEB}/recording/{r['id']}", float(r.get("score", 0)) + recording_quality(r),
+                                 date[:4] or None))
         return out[:limit]
 
     async def search_release_groups(self, q: str, limit: int = 6) -> list[Candidate]:
@@ -164,8 +172,13 @@ class MusicBrainz:
         return {"recordings": list(recs.items()), "releases": list(rels.items()), "works": list(works.items())}
 
     async def release_groups(self, mbid: str, types: str = "album|ep") -> list[dict]:
-        data = await self._get("release-group", {"artist": mbid, "type": types, "limit": 100})
-        groups = data.get("release-groups", [])
+        """The artist's own official discography, newest first. `website-default` is the filter the
+        MusicBrainz website uses: it drops bootlegs, promos and fan compilations. Live albums, remix
+        and DJ-mix records are skipped too: their credits are mostly reissued studio credits."""
+        data = await self._get("release-group", {"artist": mbid, "type": types, "limit": 100,
+                                                 "release-group-status": "website-default"})
+        groups = [g for g in data.get("release-groups", [])
+                  if not set(g.get("secondary-types") or []) & SKIP_SECONDARY]
         groups.sort(key=lambda g: g.get("first-release-date") or "", reverse=True)
         return groups
 
@@ -207,7 +220,7 @@ class MusicBrainz:
                 release_level.append((ref, role, f"{rel.get('type')} (whole release)"))
         for li in r.get("label-info", []):
             lab = li.get("label")
-            if lab and lab.get("id"):
+            if lab and lab.get("id") and lab["id"] != NO_LABEL_ID:
                 release_level.append((PersonRef(NAME, "label:" + lab["id"], lab["name"], f"{WEB}/label/{lab['id']}", "label"),
                                       "label", "Release label"))
         out = []
@@ -223,11 +236,12 @@ class MusicBrainz:
 
     async def recording_track(self, rid: str) -> TrackRec:
         rec = await self._get_inc(f"recording/{rid}", [
-            ["artist-credits", "releases", "artist-rels", "work-rels", "work-level-rels", "place-rels", "label-rels"],
+            ["artist-credits", "releases", "release-groups", "artist-rels", "work-rels", "work-level-rels", "place-rels", "label-rels"],
+            ["artist-credits", "releases", "release-groups", "artist-rels", "work-rels", "work-level-rels"],
             ["artist-credits", "releases", "artist-rels", "work-rels", "work-level-rels"],
             ["artist-credits", "releases", "artist-rels", "work-rels"],
         ])
-        rel = (sorted(rec.get("releases") or [], key=lambda x: x.get("date") or "9999") or [None])[0]
+        rel = (sorted(rec.get("releases") or [], key=release_rank) or [None])[0]
         rref = ReleaseRef(NAME, "release:" + rel["id"], rel.get("title", ""), f"{WEB}/release/{rel['id']}",
                           rel.get("date")) if rel else None
         return self._track_from_recording(rec, rec.get("artist-credit"), rref, None)
@@ -259,6 +273,37 @@ class MusicBrainz:
         return tr
 
 
+_VERSION_WORDS = re.compile(r"\b(live|remix|mix\b|dj[\u2010-]?mix|instrumental|a ?cappella|acapella|clean|edit|"
+                           r"atmos|karaoke|sped up|slowed|demo|cover|part of)", re.I)
+
+
+def release_rank(rel: dict) -> tuple:
+    """Order a recording's releases so the artist's own original release comes first: official
+    before bootleg, studio album/EP/single before compilations, live and DJ mixes, then oldest."""
+    rg = rel.get("release-group") or {}
+    secondary = rg.get("secondary-types") or []
+    return (0 if (rel.get("status") or "Official") == "Official" else 1,
+            1 if secondary else 0,
+            {"Album": 0, "EP": 0, "Single": 1}.get(rg.get("primary-type") or "", 2),
+            rel.get("date") or "9999")
+
+
+def recording_quality(r: dict) -> float:
+    """Search-ranking adjustment so the original studio recording beats live, remix, DJ-mix,
+    bootleg and compilation-only versions that MusicBrainz scores equally."""
+    adj = 0.0
+    if _VERSION_WORDS.search(r.get("disambiguation") or ""):
+        adj -= 20
+    rels = r.get("releases") or []
+    if not any((x.get("status") or "") == "Official" for x in rels):
+        adj -= 15
+    if any((x.get("status") == "Official") and not (x.get("release-group") or {}).get("secondary-types")
+           and (x.get("release-group") or {}).get("primary-type") in ("Album", "EP", "Single") for x in rels):
+        adj += 5
+    adj += min(len(rels), 30) / 6     # the canonical recording appears on many releases
+    return adj
+
+
 def _rel_target(rel: dict) -> tuple[PersonRef | None, str | None]:
     tt = rel.get("target-type")
     role = mb_role(rel.get("type", ""), rel.get("attributes"))
@@ -269,7 +314,7 @@ def _rel_target(rel: dict) -> tuple[PersonRef | None, str | None]:
     if tt == "place" and rel.get("place"):
         pl = rel["place"]
         return PersonRef(NAME, "place:" + pl["id"], pl.get("name", "?"), f"{WEB}/place/{pl['id']}", "studio"), "studio"
-    if tt == "label" and rel.get("label"):
+    if tt == "label" and rel.get("label") and rel["label"].get("id") != NO_LABEL_ID:
         lb = rel["label"]
         return PersonRef(NAME, "label:" + lb["id"], lb.get("name", "?"), f"{WEB}/label/{lb['id']}", "label"), role
     return None, None

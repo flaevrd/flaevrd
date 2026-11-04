@@ -54,3 +54,18 @@ def normalize_url(url: str) -> str:
     if u and not re.match(r"^https?://", u, re.I):
         u = "https://" + u
     return u.rstrip("/")
+
+
+def contact_key(contact_type: str, value: str) -> tuple[str, str]:
+    """Identity of a contact for de-duplication across sources: ignores scheme, www., case,
+    trailing slashes and tab suffixes, and treats twitter.com and x.com as the same account."""
+    v = (value or "").strip().lower()
+    if contact_type in {"email", "phone"}:
+        return contact_type, re.sub(r"\s+", "", v)
+    v = re.sub(r"^https?://", "", v)
+    v = re.sub(r"^(www\.|m\.|mobile\.)", "", v)
+    v = re.sub(r"^twitter\.com/", "x.com/", v)
+    v = re.sub(r"[?#].*$", "", v).rstrip("/")
+    if contact_type == "youtube":
+        v = re.sub(r"/(videos|featured|about|streams)$", "", v)
+    return contact_type, v
