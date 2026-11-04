@@ -38,6 +38,8 @@ class Researcher:
         self.lastfm = LastFm(http)
         self.web = WebsiteContacts(http)
         self.jobs: dict[int, asyncio.Task] = {}
+        self.expansions: dict[tuple[int, int], asyncio.Task] = {}
+        self.compute_lock = asyncio.Lock()
 
     # ---------------------------------------------------------------------------------
     def provider_status(self) -> list[dict]:
@@ -174,8 +176,11 @@ class Researcher:
         return out
 
     # ---- person research --------------------------------------------------------------------
-    async def research_person(self, sid: int, provider: str, xid: str, degree: int) -> int | None:
-        """Collect a person's credits from every configured source. Returns the entity id."""
+    async def research_person(self, sid: int, provider: str, xid: str, degree: int,
+                              limits: tuple[int, int, int] | None = None) -> int | None:
+        """Collect a person's credits from every configured source. Returns the entity id.
+        `limits` = (releases, credited recordings, Genius songs) overrides the light defaults used
+        for connections (expansions from the graph go a bit deeper than automatic 2nd degree)."""
         full = degree == 1
         anchor = (provider, xid)
         eid = self._anchor(provider, xid)
@@ -252,15 +257,18 @@ class Researcher:
         # 2. credits from every source, in parallel (rate limits are per host)
         n_rel = settings.max_releases if full else 2
         n_rec = settings.max_credit_recordings if full else 8
+        n_gen = 20 if full else 8
+        if limits and not full:
+            n_rel, n_rec, n_gen = limits
         jobs = []
         if mb_artist:
             jobs.append(self._mb_person_tracks(sid, mb_artist, anchor, degree, n_rel, n_rec))
         gid = self.store.ident(eid, "genius")
         if gid and self.genius.configured():
-            jobs.append(self._genius_person_tracks(sid, gid, anchor, degree, 20 if full else 8))
+            jobs.append(self._genius_person_tracks(sid, gid, anchor, degree, n_gen))
         did = self.store.ident(eid, "discogs")
         if did and self.discogs.configured():
-            jobs.append(self._discogs_person_tracks(sid, did, anchor, degree, n_rel if full else 2))
+            jobs.append(self._discogs_person_tracks(sid, did, anchor, degree, n_rel))
         counts = list(await asyncio.gather(*jobs))
 
         # Producers/engineers are rarely a song's primary artist, so Genius search by name misses them.
@@ -545,6 +553,69 @@ class Researcher:
         self.db.x("UPDATE entities SET profiled_at=? WHERE id=?", (now(), eid))
         return eid
 
+    # ---- step 2: expand a node of the graph ------------------------------------------------------
+    def expand_node(self, sid: int, eid: int) -> dict:
+        """Research one more person inside an existing research session. Their collaborators join
+        the session's graph one ring further out. Runs in the background; poll expansion_status."""
+        row = self.db.one("SELECT status, root_entity_id FROM research_sessions WHERE id=?", (sid,))
+        if not row or row["status"] != "done":
+            raise ValueError("Only a finished research can be expanded.")
+        if eid == row["root_entity_id"]:
+            raise ValueError("This is the centre of the research; it is already fully researched.")
+        task = self.expansions.get((sid, eid))
+        if task and not task.done():
+            return {"status": "running"}
+        self.db.x("INSERT INTO session_expansions(session_id,entity_id,status,requested_at) VALUES(?,?,?,?) "
+                  "ON CONFLICT(session_id,entity_id) DO UPDATE SET status='running', requested_at=excluded.requested_at, "
+                  "finished_at=NULL", (sid, eid, "running", now()))
+        self.expansions[(sid, eid)] = asyncio.create_task(self._run_expand(sid, eid))
+        return {"status": "running"}
+
+    async def _run_expand(self, sid: int, eid: int) -> None:
+        name = (self.db.one("SELECT name FROM entities WHERE id=?", (eid,)) or {"name": "?"})["name"]
+        try:
+            # 1. everything already in the database for this person (instant, from earlier research)
+            for r in self.db.q("SELECT DISTINCT track_id FROM credits WHERE entity_id=?", (eid,)):
+                self._add_session_track(sid, r["track_id"], eid, 3)
+            # 2. live research from the first identifier we have
+            researched = False
+            for p in ("musicbrainz", "genius", "discogs"):
+                xid = self.store.ident(eid, p)
+                if xid and (p != "genius" or self.genius.configured()) and (p != "discogs" or self.discogs.configured()):
+                    self.db.log(sid, f"Expanding {name} from the graph …")
+                    new = await self.research_person(sid, p, xid, degree=3, limits=(4, 15, 12))
+                    eid = new or eid
+                    researched = True
+                    break
+            if not researched:
+                self.db.log(sid, f"{name} has no MusicBrainz/Genius/Discogs identifier; expanded from credits "
+                                 f"already in the database only.", "warn")
+            eid = await self.enrich(sid, eid, full=False)
+            for r in self.db.q("SELECT DISTINCT track_id FROM credits WHERE entity_id=?", (eid,)):
+                self._add_session_track(sid, r["track_id"], eid, 3)
+            n = self.db.one("SELECT COUNT(DISTINCT track_id) n FROM session_tracks WHERE session_id=? AND via_entity_id=?",
+                            (sid, eid))["n"]
+            self.db.x("UPDATE session_expansions SET status='done', tracks=?, finished_at=? WHERE session_id=? AND entity_id=?",
+                      (n, now(), sid, eid))
+            async with self.compute_lock:
+                result = self.compute(sid)
+                self.db.x("UPDATE research_sessions SET result=? WHERE id=?", (json.dumps(result), sid))
+            self.db.log(sid, f"Expanded {name}: {n} credited tracks in this research.")
+        except Exception as e:
+            self.db.log(sid, f"Expanding {name} failed: {type(e).__name__}: {e}", "error")
+            self.db.x("UPDATE session_expansions SET status='failed', finished_at=? WHERE session_id=? AND entity_id=?",
+                      (now(), sid, eid))
+
+    def expansion_status(self, sid: int) -> list[dict]:
+        rows = [dict(r) for r in self.db.q(
+            "SELECT x.entity_id, e.name, x.status, x.tracks, x.requested_at, x.finished_at FROM session_expansions x "
+            "LEFT JOIN entities e ON e.id=x.entity_id WHERE x.session_id=? ORDER BY x.requested_at", (sid,))]
+        for r in rows:  # a server restart kills running tasks
+            t = self.expansions.get((sid, r["entity_id"]))
+            if r["status"] == "running" and (t is None or t.done()):
+                r["status"] = "failed"
+        return rows
+
     # ---- result ----------------------------------------------------------------------------------
     def compute(self, sid: int) -> dict:
         row = self.db.one("SELECT * FROM research_sessions WHERE id=?", (sid,))
@@ -558,6 +629,11 @@ class Researcher:
         direct_full = [{**d, **(network.score_pair(s_all, root, d["id"]) or {})} for d in direct]
         second = network.second_degree(s_all, root, direct_full)
         disc = network.discoveries(s_all, root, direct_full, second) if root in s_all.entities else {}
+
+        expanded = [r["entity_id"] for r in self.db.q(
+            "SELECT entity_id FROM session_expansions WHERE session_id=? AND status='done' ORDER BY requested_at", (sid,))]
+        g = network.graph(s_all, root, direct_full, second, center=None) if root in s_all.entities else None
+        expanded_people = network.add_expansions(s_all, g, expanded) if g else []
 
         center = None
         if row["root_track_id"]:
@@ -618,7 +694,8 @@ class Researcher:
             "tracks": tracks[:300], "recurring": recurring[:40],
             "direct": [{**d, "evidence": d["evidence"][:8]} for d in direct_full[:150]],
             "second": second[:150], "discover": disc,
-            "graph": network.graph(s_all, root, direct_full, second, center=center) if root in s_all.entities else None,
+            "graph": {**g, "center": center} if g else None, "expanded": expanded,
+            "expanded_people": expanded_people[:300],
             "contacts": contacts, "sources": sorted(sources.values(), key=lambda x: (x["provider"], x["url"]))[:600],
         }
 
