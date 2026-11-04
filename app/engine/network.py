@@ -198,7 +198,8 @@ def direct_network(s: Scope, root: int) -> list[dict]:
 def people_first(x: dict) -> tuple:
     """Rank people and groups above labels, publishers and studios: the goal is finding people to
     contact. Business entities stay in the list (and in the graph), just after the people."""
-    return (0 if x["type"] in PERSONLIKE else 1, -x["strength"], -x.get("path_count", 0), x["name"])
+    return (0 if x["type"] in PERSONLIKE else 1, -x["strength"], -x.get("independent_tracks", 0),
+            -x.get("path_count", 0), x["name"])
 
 
 def second_degree(s: Scope, root: int, direct: list[dict], limit_paths: int = 4) -> list[dict]:
@@ -258,14 +259,21 @@ def second_degree(s: Scope, root: int, direct: list[dict], limit_paths: int = 4)
         roles = Counter()
         for p in paths:
             roles.update(p["y_roles"])
-        strength = min(95, paths[0]["strength"] + 8 * (len({p["via_id"] for p in paths}) - 1))
+        if set(roles) <= {"other"}:
+            continue  # only non-music credits (thanks, artwork...): not a professional connection
+        # Independent paths = different connecting songs. Ten collaborators all reached through one
+        # posse cut are one connection, not ten.
+        y_tracks = {e["track_id"] for p in paths for e in p["evidence"]}
+        strength = min(95, paths[0]["strength"] + 8 * (min(len(y_tracks), len({p["via_id"] for p in paths})) - 1))
         via_ids = {p["via_id"] for p in paths}
         vias = [s.entities[v]["name"] for v in sorted(
             via_ids, key=lambda v: (s.entities[v].get("type") not in PERSONLIKE, s.entities[v]["name"]))]
         out.append({**s.entities[y], "degree": 2, "strength": strength, "roles": dict(roles),
                     "group": main_group(roles), "paths": paths[:limit_paths], "path_count": len(paths),
                     "relationship": paths[0]["type"],
-                    "why": (f"Reached through {len(vias)} independent connection{'s' if len(vias) != 1 else ''}: "
+                    "independent_tracks": len(y_tracks),
+                    "why": (f"Reached through {len(vias)} collaborator{'s' if len(vias) != 1 else ''} on "
+                            f"{len(y_tracks)} different song{'s' if len(y_tracks) != 1 else ''}: "
                             + ", ".join(vias[:4]) + (" …" if len(vias) > 4 else ""))})
     out.sort(key=people_first)
     return out
@@ -326,7 +334,7 @@ def discoveries(s: Scope, root: int, direct: list[dict], second: list[dict]) -> 
             writers.append({"id": eid, "name": d["name"], "type": d["type"], "group": d["group"], "score": len(arts),
                             "why": f"Writing credits for {len(arts)} different artists in this network: "
                                    + ", ".join(names[a] for a in list(arts)[:5])})
-        if d["degree"] == 2 and d.get("path_count", 0) >= 2:
+        if d["degree"] == 2 and d.get("path_count", 0) >= 2 and d.get("independent_tracks", 0) >= 2:
             vias = sorted({p["via_name"] for p in d["paths"]})
             if len(vias) >= 2:
                 connectors.append({"id": eid, "name": d["name"], "type": d["type"], "group": d["group"],

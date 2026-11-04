@@ -4,7 +4,8 @@ Identity rules (in order; first hit wins):
 1. Same provider ID already known                         -> same entity
 2. Authoritative cross-link (MusicBrainz/Wikidata/Discogs profile links to the other provider's
    page)                                                  -> same entity (merges duplicates)
-3. Same normalized name credited on the *same track* by another provider -> same entity
+3. Same normalized name (or a listed alias) credited on the *same track* by another provider
+                                                          -> same entity
 4. Same normalized name AND already co-credited with someone on this track -> same entity
 Otherwise a new entity is created. If another entity has the same name but none of the rules
 apply, the pair is stored in `identity_questions` and shown as an ambiguity instead of merged.
@@ -122,6 +123,29 @@ class Store:
                 db.x("INSERT OR IGNORE INTO aliases(entity_id,alias) VALUES(?,?)", (keep, name["name"]))
             db.x("DELETE FROM entities WHERE id=?", (drop,))
 
+    def _merge_alias_duplicates(self, entity_id: int, names: list[str]) -> int:
+        """Rule 3 applied after the fact: a profile lists an alias (e.g. MusicBrainz: Derek Ali is
+        also credited as "MixedByAli"), and an entity with exactly that name, from a provider this
+        entity doesn't have yet, is credited on one of the same tracks. Then it is the same person."""
+        norms = {norm_name(n) for n in names if n} - {""}
+        if not norms:
+            return entity_id
+        marks = ",".join("?" * len(norms))
+        for row in self.db.q(f"SELECT id FROM entities WHERE norm_name IN ({marks}) AND id<>?", (*norms, entity_id)):
+            other = row[0]
+            provs = {r[0] for r in self.db.q("SELECT provider FROM entity_identifiers WHERE entity_id=?", (other,))}
+            mine = {r[0] for r in self.db.q("SELECT provider FROM entity_identifiers WHERE entity_id=?", (entity_id,))}
+            if provs & mine:
+                continue
+            shared = self.db.one("SELECT 1 FROM credits a JOIN credits b ON a.track_id=b.track_id "
+                                 "WHERE a.entity_id=? AND b.entity_id=? LIMIT 1", (entity_id, other))
+            if shared:
+                for r in self.db.q("SELECT provider, external_id, url FROM entity_identifiers WHERE entity_id=?", (other,)):
+                    self.db.x("UPDATE entity_identifiers SET match_method='alias_same_track' "
+                              "WHERE entity_id=? AND provider=? AND external_id=?", (other, r[0], r[1]))
+                self.merge(entity_id, other)
+        return entity_id
+
     # ---- releases & tracks --------------------------------------------------------------
     def _release(self, rec: TrackRec) -> int | None:
         r = rec.release
@@ -190,6 +214,7 @@ class Store:
                 entity_id = self.link(entity_id, prov, value, None, "cross_link")
         for n in p.names:
             db.x("INSERT OR IGNORE INTO aliases(entity_id,alias) VALUES(?,?)", (entity_id, n))
+        entity_id = self._merge_alias_duplicates(entity_id, p.names)
         for f in p.facts:
             sid = db.source(f.source_provider, f.source_url, f.source_description)
             db.x("INSERT OR IGNORE INTO facts(entity_id,field,value,source_id,retrieved_at) VALUES(?,?,?,?,?)",

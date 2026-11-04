@@ -203,3 +203,16 @@ def test_genius_roles_and_nicknames():
     assert is_video_credit("Video Director") and not is_video_credit("Vocals")
     assert role_from_text("Ad-Libs") == "vocals"
     assert role_from_text("Viola") == "instrument"
+
+
+def test_alias_on_same_track_merges(tmp_path):
+    db = DB(tmp_path / "t.db")
+    st = Store(db)
+    st.save_track(_track("musicbrainz", "r1", "Song One", ("mb-a", "Artist A"), [("mb-c", "Engineer C", "mixing_engineer")]))
+    st.save_track(_track("genius", "g1", "Song One", ("g-a", "Artist A"), [("g-c", "MixedByC", "mixing_engineer")]))
+    eng = st.by_ident("musicbrainz", "mb-c")
+    assert st.by_ident("genius", "g-c") != eng
+    p = ProfileData()
+    p.names = ["MixedByC"]
+    st.apply_profile(eng, p)
+    assert st.by_ident("genius", "g-c") == eng
