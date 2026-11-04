@@ -7,9 +7,10 @@ album. It collects the credits behind the music from several sources and maps wh
 on which tracks. It also follows those connections to people one step further out, and shows
 publicly listed professional contacts. Every fact links back to its source.
 
-This is **Step 1** (research and discovery engine). It already includes a first network graph,
-second-degree discovery, similar-network recommendations, and a basic people database with CSV
-export, so research results can be kept.
+**Step 1** is the research and discovery engine: network graph, second-degree discovery,
+similar-network recommendations, and a basic people database with CSV export.
+**Step 2** adds network exploration: expand any person in the graph, compare two people's networks,
+and a Discover area that works across all your research.
 
 ## Quick start
 
@@ -36,7 +37,13 @@ limits and costs, and how to get the keys.
 5. Click anyone to open their **profile**: background, where they're based (with sources, and a flag
    if sources disagree), credits, collaborators with evidence, contacts with verification status,
    and audience metrics or the reason they're unavailable.
-6. **Save** people with a status, tags (used as lists, e.g. "UK Network"), notes and a follow-up date.
+6. **Expand** (Network Graph): click anyone, then *Expand network*. Their own collaborators are researched
+   and added to the graph one ring further out.
+7. **Compare**: pick two people to see shared collaborators, bridges between their circles, and who
+   each one knows that the other doesn't. Also reachable from any profile or research ("Compare with…").
+8. **Discover**: people who turn up across several of your researched networks, who to research next,
+   and the strongest producers, engineers and songwriters across everything, with role/location/genre filters.
+9. **Save** people with a status, tags (used as lists, e.g. "UK Network"), notes and a follow-up date.
    Export them to CSV from **People Database**. Save a research as a project from its results page.
 
 ## Principles
