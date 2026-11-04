@@ -666,6 +666,8 @@ async function renderCompare(a, b) {
   const simpleRow = (r) => `<div class="person-row" style="grid-template-columns:44px 1fr auto"><div class="score">${r.score}<div class="bar"><i style="width:${r.score}%"></i></div></div>
       <div><a class="name" href="#/p/${r.id}">${esc(r.name)}</a> <span class="chip g-${esc(r.group)}">${esc(GROUP_NAME[r.group] || r.group)}</span><div class="roles">${roleChips(r.roles)}</div><div class="why">${esc(r.why)}</div></div>
       <div><button class="ghost small" data-research="${r.id}">Research →</button></div></div>`;
+  const more = (items, render, n = 10) => items.slice(0, n).map(render).join("") +
+    (items.length > n ? `<details class="ev"><summary>Show ${items.length - n} more</summary>${items.slice(n).map(render).join("")}</details>` : "");
   const headCard = (h) => `<div><h2 style="font:400 30px var(--serif);margin:0"><a class="name" href="#/p/${h.id}">${esc(h.name)}</a></h2><div class="muted mono" style="font-size:12px">${h.tracks} credited tracks · ${h.direct} direct · ${h.second} 2nd degree ${h.session_id ? `· <a href="#/r/${h.session_id}">research</a>` : `· <button class="ghost small" data-research="${h.id}">Research now →</button>`}</div></div>`;
   $("#cmp").innerHTML = `
     <div class="cmp-head">${headCard(c.a)}<div class="stats">
@@ -679,16 +681,16 @@ async function renderCompare(a, b) {
     <div class="panel"><h3>Network map</h3><p class="faint" style="font-size:12px;margin:0 0 8px">Left: only ${esc(c.a.name)}. Middle: shared collaborators. Right: only ${esc(c.b.name)}. Gold links are bridges (a collaborator of each who worked together).</p><div id="cy-cmp"></div></div>
     <div class="grid2">
       <div>
-        <div class="panel"><h3>Shared collaborators · ${c.shared_direct.length}</h3><p class="faint" style="font-size:12px;margin:0 0 8px">Credited with both. Score = the weaker of the two relationships.${Object.keys(o.by_group).length ? " " + Object.entries(o.by_group).map(([g, n]) => `${n} ${esc((GROUP_NAME[g] || g).toLowerCase())}`).join(", ") + "." : ""}</p>${c.shared_direct.map(sharedRow).join("") || `<div class="empty">No collaborator is credited with both in the researched credits.</div>`}</div>
-        <div class="panel"><h3>Bridges · ${c.bridges.length}</h3><p class="faint" style="font-size:12px;margin:0 0 8px">A collaborator of ${esc(c.a.name)} who worked with a collaborator of ${esc(c.b.name)}. Score = weakest link in the chain.</p>${c.bridges.map((br) => `
+        <div class="panel"><h3>Shared collaborators · ${c.shared_direct.length}</h3><p class="faint" style="font-size:12px;margin:0 0 8px">Credited with both. Score = the weaker of the two relationships.${Object.keys(o.by_group).length ? " " + Object.entries(o.by_group).map(([g, n]) => `${n} ${esc((GROUP_NAME[g] || g).toLowerCase())}`).join(", ") + "." : ""}</p>${more(c.shared_direct, sharedRow) || `<div class="empty">No collaborator is credited with both in the researched credits.</div>`}</div>
+        <div class="panel"><h3>Bridges · ${c.bridges.length}</h3><p class="faint" style="font-size:12px;margin:0 0 8px">A collaborator of ${esc(c.a.name)} who worked with a collaborator of ${esc(c.b.name)}. Score = weakest link in the chain.</p>${more(c.bridges, (br) => `
           <div style="padding:9px 0;border-top:1px solid var(--line)"><span class="mono faint" style="float:right">${br.score}</span>
           <a class="name" href="#/p/${br.x.id}">${esc(br.x.name)}</a> ⇄ <a class="name" href="#/p/${br.y.id}">${esc(br.y.name)}</a>
-          <div class="why">${esc(br.why)}</div><div class="prov">${br.middle.evidence.map((e) => `${esc(e.title)} ${provLinks(e.sources)}`).join(" · ")}</div></div>`).join("") || `<div class="empty">No bridges found between the two direct networks.</div>`}</div>
-        <div class="panel"><h3>In both extended networks · ${c.shared_extended.length}</h3>${c.shared_extended.map(sharedRow).join("") || `<div class="empty">None. Second-degree overlap needs both people researched with “+ 2nd degree”.</div>`}</div>
+          <div class="why">${esc(br.why)}</div><div class="prov">${br.middle.evidence.map((e) => `${esc(e.title)} ${provLinks(e.sources)}`).join(" · ")}</div></div>`) || `<div class="empty">No bridges found between the two direct networks.</div>`}</div>
+        <div class="panel"><h3>In both extended networks · ${c.shared_extended.length}</h3>${more(c.shared_extended, sharedRow) || `<div class="empty">None. Second-degree overlap needs both people researched with “+ 2nd degree”.</div>`}</div>
       </div>
       <div>
-        <div class="panel"><h3>Only ${esc(c.a.name)} · ${c.only_a.length}</h3>${c.only_a.slice(0, 15).map(simpleRow).join("") || `<div class="empty">—</div>`}</div>
-        <div class="panel"><h3>Only ${esc(c.b.name)} · ${c.only_b.length}</h3>${c.only_b.slice(0, 15).map(simpleRow).join("") || `<div class="empty">—</div>`}</div>
+        <div class="panel"><h3>Only ${esc(c.a.name)} · ${c.only_a.length}</h3>${more(c.only_a, simpleRow) || `<div class="empty">—</div>`}</div>
+        <div class="panel"><h3>Only ${esc(c.b.name)} · ${c.only_b.length}</h3>${more(c.only_b, simpleRow) || `<div class="empty">—</div>`}</div>
       </div>
     </div>`;
   wireResearchButtons($("#cmp"));
@@ -758,7 +760,7 @@ async function renderDiscover() {
     store.set("discF", JSON.stringify(F));
     const L = d.people.filter((p) => (!F.g || p.group === F.g) && (!F.l || p.location === F.l || p.country === F.l) && (!F.ge || p.genres.includes(F.ge)) && (!F.h || !p.crm) && (!F.q || p.name.toLowerCase().includes(F.q)));
     const research = (x) => x.researched ? "" : `<div style="margin-top:6px"><button class="ghost small" data-research="${x.id}">Research →</button></div>`;
-    const sec = (title, hint, items, extra) => `<div class="panel"><h3>${title} · ${items.length}</h3>${hint ? `<p class="faint" style="margin:0 0 8px;font-size:12px">${hint}</p>` : ""}${items.slice(0, 15).map((x) => card(x, extra ? extra(x) : "")).join("") || `<div class="empty">Nobody here with the current filters.</div>`}</div>`;
+    const sec = (title, hint, items, extra) => `<div class="panel"><h3>${title} · ${items.length}</h3>${hint ? `<p class="faint" style="margin:0 0 8px;font-size:12px">${hint}</p>` : ""}${items.slice(0, 8).map((x) => card(x, extra ? extra(x) : "")).join("")}${items.length > 8 ? `<details class="ev"><summary>Show ${Math.min(items.length, 40) - 8} more</summary>${items.slice(8, 40).map((x) => card(x, extra ? extra(x) : "")).join("")}</details>` : ""}${items.length ? "" : `<div class="empty">Nobody here with the current filters.</div>`}</div>`;
     const multi = L.filter((x) => x.networks >= 2);
     const next = L.filter((x) => !x.researched).sort((a, b) => b.score - a.score);
     const byRole = (g) => L.filter((x) => x.group === g).sort((a, b) => b.score - a.score);

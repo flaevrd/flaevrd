@@ -82,8 +82,13 @@ def compare(db: DB, a: int, b: int, limit: int = 25) -> dict:
             names[d["id"]] = d
     a1 = {d["id"]: d for d in A["direct"]}
     b1 = {d["id"]: d for d in B["direct"]}
-    a2 = {d["id"]: d for d in A["second"]}
-    b2 = {d["id"]: d for d in B["second"]}
+    def via_other(d: dict, other: int) -> dict | None:
+        """A second-degree row reached only through the other compared person says nothing new."""
+        paths = [p for p in d.get("paths", []) if _fix(rd, p["via_id"]) != other]
+        return {**d, "paths": paths} if paths else None
+
+    a2 = {d["id"]: x for d in A["second"] if (x := via_other(d, b))}
+    b2 = {d["id"]: x for d in B["second"] if (x := via_other(d, a))}
     a_all, b_all = {**a2, **a1}, {**b2, **b1}
 
     # direct link between the two
@@ -244,13 +249,16 @@ def discover_all(db: DB, saved_only: bool = False) -> dict:
             eid = _fix(rd, d["id"])
             if eid == root or eid in seen_here or d.get("type") not in PERSONLIKE:
                 continue
+            if d.get("paths") and all(_fix(rd, x.get("via_id")) in roots for x in d["paths"]):
+                continue  # only reached through another researched person: that network already counts them
             seen_here.add(eid)
             p = people.setdefault(eid, {"id": eid, "name": d["name"], "type": d["type"], "groups": Counter(),
                                         "roles": Counter(), "appearances": [], "score": 0.0})
             deg = d.get("degree", 1)
             p["groups"][d.get("group", "other")] += 1
             p["roles"].update(d.get("roles") or {})
-            via = d["paths"][0]["via_name"] if d.get("paths") else d.get("via_name")
+            other_paths = [x for x in d.get("paths") or [] if _fix(rd, x.get("via_id")) not in roots]
+            via = other_paths[0]["via_name"] if other_paths else d.get("via_name")
             p["appearances"].append({"root_id": root, "root": net["name"], "session_id": net["session_id"],
                                      "degree": deg, "strength": d.get("strength", 0), "via": via,
                                      "relationship": d.get("relationship")})

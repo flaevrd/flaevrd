@@ -80,15 +80,43 @@ def test_discover_all_aggregates_across_research_and_follows_merges():
     Y2 = {"id": ids["y"], "name": "Writer Y", "type": "person", "group": "writer", "strength": 30, "degree": 2,
           "roles": {"writer": 1}, "paths": [{"via_name": "Producer X"}]}
     _session(db, ids["a"], [P, X], [Y2], saved=1)
-    _session(db, ids["b"], [{**P, "strength": 40}])
+    # Artist D appears in B's research only through Artist A, who has a research of their own
+    A_via = {"id": ids["d"], "name": "Artist D", "type": "person", "group": "artist", "strength": 50, "degree": 2,
+             "roles": {"main_artist": 1}, "paths": [{"via_id": ids["a"], "via_name": "Artist A"}]}
+    _session(db, ids["b"], [{**P, "strength": 40}], [A_via])
     out = insights.discover_all(db)
     top = out["people"][0]
     assert top["name"] == "Producer P" and top["networks"] == 2 and top["score"] == 100
     y = next(p for p in out["people"] if p["name"] == "Writer Y")
     assert y["score"] == round(30 * insights.SECOND_WEIGHT) and "via Producer X" in y["why"]
+    assert not any(p["name"] == "Artist D" for p in out["people"])  # only reachable through a researched root
     assert {n["root_id"] for n in out["networks"]} == {ids["a"], ids["b"]}
     assert len(insights.discover_all(db, saved_only=True)["networks"]) == 1
     # an entity merged after the research was stored is followed to the surviving id
     st.merge(ids["e"], ids["p"])
     out = insights.discover_all(db)
     assert out["people"][0]["id"] == ids["e"] and out["people"][0]["networks"] == 2
+
+
+def test_compute_includes_graph_and_expansions():
+    """End to end through Researcher.compute: the graph survives next to contacts and carries the
+    expansion ring."""
+    from app.engine.research import Researcher
+    db, st, ids = _world()
+    r = Researcher(db, http=None)
+    sid = db.x("INSERT INTO research_sessions(query,target_kind,status,root_entity_id,created_at) "
+               "VALUES('Artist A','artist','done',?,?)", (ids["a"], now()))
+    for row in db.q("SELECT DISTINCT track_id FROM credits WHERE entity_id=?", (ids["a"],)):
+        r._add_session_track(sid, row[0], None, 1)
+    for row in db.q("SELECT DISTINCT track_id FROM credits WHERE entity_id=?", (ids["x"],)):
+        r._add_session_track(sid, row[0], ids["x"], 3)
+    db.x("INSERT INTO session_expansions(session_id,entity_id,status,requested_at) VALUES(?,?,'done',?)",
+         (sid, ids["x"], now()))
+    res = r.compute(sid)
+    assert {"nodes", "edges"} <= set(res["graph"])
+    assert res["expanded"] == [ids["x"]]
+    nodes = {n["id"]: n for n in res["graph"]["nodes"]}
+    assert nodes[ids["x"]].get("expanded") is True
+    # Expanding a direct collaborator deepens second degree: X's other artist now shows up there
+    assert nodes[ids["d"]]["degree"] == 2
+    assert any(p["name"] == "Artist D" for p in res["second"])

@@ -632,8 +632,8 @@ class Researcher:
 
         expanded = [r["entity_id"] for r in self.db.q(
             "SELECT entity_id FROM session_expansions WHERE session_id=? AND status='done' ORDER BY requested_at", (sid,))]
-        g = network.graph(s_all, root, direct_full, second, center=None) if root in s_all.entities else None
-        expanded_people = network.add_expansions(s_all, g, expanded) if g else []
+        net_graph = network.graph(s_all, root, direct_full, second, center=None) if root in s_all.entities else None
+        expanded_people = network.add_expansions(s_all, net_graph, expanded) if net_graph else []
 
         center = None
         if row["root_track_id"]:
@@ -694,7 +694,7 @@ class Researcher:
             "tracks": tracks[:300], "recurring": recurring[:40],
             "direct": [{**d, "evidence": d["evidence"][:8]} for d in direct_full[:150]],
             "second": second[:150], "discover": disc,
-            "graph": {**g, "center": center} if g else None, "expanded": expanded,
+            "graph": {**net_graph, "center": center} if net_graph else None, "expanded": expanded,
             "expanded_people": expanded_people[:300],
             "contacts": contacts, "sources": sorted(sources.values(), key=lambda x: (x["provider"], x["url"]))[:600],
         }

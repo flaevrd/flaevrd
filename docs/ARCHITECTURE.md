@@ -152,6 +152,10 @@ For each person: in how many networks they appear, how (direct, via whom, or fou
 networks, research next (not researched yet), producers, engineers, songwriters, artists, emerging artists and
 connectors, with filters for role, location, genre and "hide people already in my database".
 
+A second-degree appearance reached only through another researched person is not counted again (that
+person's own network already counts it). Discover reads the stored result, which keeps each research's top 150
+direct and 150 second-degree people, so very large networks contribute their strongest people only.
+
 Entity merges after a research was stored are followed through `entity_redirects`, so old results still point
 at the right person.
 
