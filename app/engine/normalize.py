@@ -22,8 +22,14 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
+_NICKNAME = re.compile(r'\s[“"][^“”"]{1,30}[”"]\s')
+
+
 def norm_name(name: str) -> str:
     """'The Neptunes' == 'Neptunes'; 'Beyoncé' == 'Beyonce'; 'A$AP Rocky' -> 'asap rocky'."""
+    # 'Mauricio “Veto” Iragorri' == 'Mauricio Iragorri': drop a quoted nickname inside a name
+    base = _NICKNAME.sub(" ", name or "")
+    name = base if base.strip() else name
     s = strip_accents(clean_discogs_name(name)).lower().replace("&", " and ").replace("$", "s")
     s = _PUNCT.sub(" ", s)
     s = _SPACES.sub(" ", s).strip()
@@ -114,9 +120,15 @@ _TEXT_RULES: list[tuple[re.Pattern, str]] = [(re.compile(p, re.I), r) for p, r i
     (r"programm|drum machine|beat", "programming"),
     (r"arrang", "arranger"),
     (r"featur", "featured_artist"),
-    (r"vocal|rap|choir|backing", "vocals"),
-    (r"guitar|bass|drum|keyboard|piano|synth|percussion|string|violin|cello|horn|sax|trumpet|organ|instrument", "instrument"),
+    (r"vocal|rap|choir|backing|ad[\s-]*libs?", "vocals"),
+    (r"guitar|bass|drum|keyboard|piano|synth|percussion|string|violin|viola|cello|horn|sax|trumpet|trombone|flute|clarinet|harp|orchestra|organ|instrument", "instrument"),
 ]]
+
+
+def is_video_credit(text: str) -> bool:
+    """Music-video crew ('Video Director', 'Video Grip'...) worked on the video, not the recording.
+    They are left out of the music network."""
+    return bool(re.match(r"\s*(music\s+)?video\b", text or "", re.I))
 
 
 def role_from_text(text: str) -> str:

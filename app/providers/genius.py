@@ -7,7 +7,7 @@ requested or stored.
 from __future__ import annotations
 
 from ..config import settings
-from ..engine.normalize import role_from_text
+from ..engine.normalize import is_video_credit, norm_name, norm_title, role_from_text
 from ..http import Http
 from .base import Candidate, ContactRec, FactRec, NotConfigured, PersonRef, ProfileData, ReleaseRef, TrackRec
 
@@ -44,13 +44,22 @@ class Genius:
         return [h["result"] for h in data.get("hits", []) if h.get("type") == "song"]
 
     async def search_songs(self, q: str, limit: int = 6) -> list[Candidate]:
+        """Score like MusicBrainz (0-100) so both sources sort together: exact title + artist 100,
+        exact title 80, otherwise 40 (covers, parodies, 'type beats' sink below real matches)."""
+        from .musicbrainz import split_query
+        title, artist = split_query(q)
+        nt, na = norm_title(title), norm_name(artist or "")
         out = []
-        for s in (await self.search(q))[:limit]:
+        for s in await self.search(f"{title} {artist}" if artist else title):
+            pa = norm_name((s.get("primary_artist") or {}).get("name", ""))
+            same_title = norm_title(s.get("title", "")) == nt
+            score = 100.0 if same_title and na and (na == pa or na in pa) else 80.0 if same_title and not na else 40.0
             out.append(Candidate("song", NAME, str(s["id"]), s.get("title", ""),
                                  " · ".join(b for b in [s.get("primary_artist", {}).get("name"),
                                                         s.get("release_date_for_display")] if b),
-                                 s.get("url")))
-        return out
+                                 s.get("url"), score))
+        out.sort(key=lambda c: -c.score)
+        return out[:limit]
 
     async def search_artists(self, q: str, limit: int = 4) -> list[Candidate]:
         seen, out = set(), []
@@ -114,6 +123,8 @@ class Genius:
             tr.add(_ref(a), "writer", "Written by")
         for perf in s.get("custom_performances") or []:
             label = perf.get("label", "")
+            if is_video_credit(label):
+                continue
             role = role_from_text(label)
             for a in perf.get("artists") or []:
                 tr.add(_ref(a, role), role, label)

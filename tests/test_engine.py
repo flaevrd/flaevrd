@@ -195,3 +195,11 @@ def test_original_recording_ranks_first():
     assert recording_quality(original) > recording_quality(live)
     comp = {"status": "Official", "date": "2016", "release-group": {"primary-type": "Album", "secondary-types": ["Compilation"]}}
     assert sorted([comp, bootleg_remix, official_album], key=release_rank)[0] is official_album
+
+
+def test_genius_roles_and_nicknames():
+    from app.engine.normalize import is_video_credit
+    assert norm_name("Mauricio “Veto” Iragorri") == norm_name("Mauricio Iragorri")
+    assert is_video_credit("Video Director") and not is_video_credit("Vocals")
+    assert role_from_text("Ad-Libs") == "vocals"
+    assert role_from_text("Viola") == "instrument"
