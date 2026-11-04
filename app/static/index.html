@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLAEVRD Network</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+<script src="/static/vendor/cytoscape.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/"><span class="mark">F</span><span>FLAEVRD <em>Network</em></span></a>
+  <nav id="nav">
+    <a href="#/" data-nav="search">Search</a>
+    <a href="#/explore" data-nav="explore">Network Explorer</a>
+    <a href="#/discover" data-nav="discover">Discover</a>
+    <a href="#/people" data-nav="people">People Database</a>
+    <a href="#/history" data-nav="history">Saved Research</a>
+  </nav>
+  <button id="providers-btn" class="ghost small" title="Data source configuration">Sources</button>
+</header>
+<main id="view"></main>
+<aside id="drawer" class="drawer hidden"></aside>
+<script src="/static/app.js"></script>
+</body>
+</html>
