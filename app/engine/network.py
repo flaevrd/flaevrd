@@ -259,7 +259,9 @@ def second_degree(s: Scope, root: int, direct: list[dict], limit_paths: int = 4)
         for p in paths:
             roles.update(p["y_roles"])
         strength = min(95, paths[0]["strength"] + 8 * (len({p["via_id"] for p in paths}) - 1))
-        vias = sorted({p["via_name"] for p in paths})
+        via_ids = {p["via_id"] for p in paths}
+        vias = [s.entities[v]["name"] for v in sorted(
+            via_ids, key=lambda v: (s.entities[v].get("type") not in PERSONLIKE, s.entities[v]["name"]))]
         out.append({**s.entities[y], "degree": 2, "strength": strength, "roles": dict(roles),
                     "group": main_group(roles), "paths": paths[:limit_paths], "path_count": len(paths),
                     "relationship": paths[0]["type"],
