@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .config import settings
 from .db import DB, now
+from .engine import insights
 from .engine.profile import build_profile
 from .engine.research import Researcher
 from .http import Http
@@ -115,7 +116,39 @@ def get_research(sid: int):
         raise HTTPException(404)
     return {"id": sid, "query": r["query"], "kind": r["target_kind"], "status": r["status"],
             "created_at": r["created_at"], "finished_at": r["finished_at"], "saved": bool(r["saved"]),
-            "title": r["title"], "log": json.loads(r["log"]), "result": json.loads(r["result"]) if r["result"] else None}
+            "title": r["title"], "log": json.loads(r["log"]), "result": json.loads(r["result"]) if r["result"] else None,
+            "expansions": researcher().expansion_status(sid)}
+
+
+# ---- step 2: expand, compare, discover ---------------------------------------------------------------
+@app.post("/api/research/{sid}/expand/{eid}")
+async def expand_node(sid: int, eid: int):
+    """Research one person of this research's graph and add their own collaborators to it."""
+    try:
+        return researcher().expand_node(sid, eid)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/research/{sid}/expansions")
+def expansions(sid: int):
+    return researcher().expansion_status(sid)
+
+
+@app.get("/api/compare")
+def compare(a: int, b: int):
+    if a == b:
+        raise HTTPException(400, "Pick two different people.")
+    for eid in (a, b):
+        if not db().one("SELECT 1 FROM entities WHERE id=?", (eid,)) and not db().one(
+                "SELECT 1 FROM entity_redirects WHERE old_id=?", (eid,)):
+            raise HTTPException(404, f"Unknown person {eid}")
+    return insights.compare(db(), a, b)
+
+
+@app.get("/api/discover")
+def discover(saved_only: bool = False):
+    return insights.discover_all(db(), saved_only)
 
 
 @app.post("/api/research/{sid}/recompute")
@@ -230,8 +263,13 @@ def export_csv():
 
 @app.get("/api/people")
 def search_people(q: str = "", limit: int = 50):
-    rows = db().q("SELECT e.id, e.name, e.entity_type, (SELECT COUNT(*) FROM credits c WHERE c.entity_id=e.id) n "
-                  "FROM entities e WHERE e.norm_name LIKE ? ORDER BY n DESC LIMIT ?", (f"%{q.lower()}%", limit))
+    from .engine.normalize import norm_name
+    nq = norm_name(q) if q.strip() else ""
+    rows = db().q("SELECT e.id, e.name, e.entity_type, e.disambiguation, "
+                  "(SELECT COUNT(DISTINCT track_id) FROM credits c WHERE c.entity_id=e.id) n, "
+                  "(SELECT COUNT(*) FROM research_sessions s WHERE s.root_entity_id=e.id AND s.status='done') researched "
+                  "FROM entities e WHERE e.norm_name LIKE ? OR e.id IN (SELECT entity_id FROM aliases WHERE lower(alias) LIKE ?) "
+                  "ORDER BY researched DESC, n DESC LIMIT ?", (f"%{nq}%", f"%{q.lower().strip()}%", limit))
     return [dict(r) for r in rows]
 
 

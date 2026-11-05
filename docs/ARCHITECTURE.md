@@ -1,4 +1,4 @@
-# Architecture (Step 1)
+# Architecture (Steps 1–2)
 
 ```
 Browser (app/static, no build step)
@@ -9,6 +9,7 @@ Research engine (app/engine)
    ├─ research.py   orchestration: suggest → identify → collect credits → expand → enrich → compute
    ├─ store.py      persistence + entity resolution (identity rules below)
    ├─ network.py    relationships, strength score, 2nd degree, discovery categories, graph
+   ├─ insights.py   Step 2: compare two networks, Discover across all research
    ├─ profile.py    person profile with per-fact sources, discrepancies, contacts, metrics
    └─ normalize.py  name/title normalization, role vocabulary
    │
@@ -112,7 +113,53 @@ from the facts.
 - Deleting a research session keeps people/credits. Removing a saved person only removes your CRM data.
   The HTTP cache can be cleared via `POST /api/maintenance/clear-cache`.
 
-## Known limits of Step 1
+## Step 2: expand, compare, discover
+
+### Expanding a node (`POST /api/research/{id}/expand/{entity}`)
+
+Any person in a finished research's graph can be expanded. The job runs in the background:
+
+1. Every track already in the database that credits the person joins the session (`session_tracks.degree = 3`,
+   `via_entity_id` = the person). This is instant.
+2. The person is researched live from their first identifier (MusicBrainz, then Genius, then Discogs), a bit
+   deeper than automatic second degree (4 releases, 15 credited recordings, 12 Genius songs).
+3. Their profile is enriched (location, contacts, metrics), then the research result is recomputed.
+
+`network.add_expansions` puts up to 15 of the person's strongest collaborators into the graph, one ring further
+out (`expanded_from` on the node), and draws links to people who are already in the graph, so clusters show.
+Every new node keeps its evidence (tracks, sources). Expanding a direct collaborator also strengthens second-degree
+results, since their new credits are part of the session. Status is in `session_expansions`
+(`GET /api/research/{id}/expansions`).
+
+### Comparing two networks (`GET /api/compare?a=&b=`)
+
+Each side's direct network comes from every credit in the database. Their second degree comes from their latest
+finished research. The comparison shows:
+
+- **Direct link**: tracks the two share, with sources.
+- **Shared collaborators**: credited with both. Score = the weaker of the two relationships.
+- **Bridges**: A → X → Y → B, where X is A's collaborator, Y is B's, and X and Y share a track. Score = the
+  weakest link in the chain.
+- **In both extended networks**: people within two steps of both.
+- **Only A / only B**: each side's strongest people the other side doesn't reach.
+- **Overlap**: shared direct people ÷ all direct people (Jaccard), split by role.
+
+### Discover across all research (`GET /api/discover?saved_only=`)
+
+Reads the stored result of every finished research (latest per root person; optionally saved projects only).
+For each person: in how many networks they appear, how (direct, via whom, or found by expansion), and a score
+= sum of relationship strengths, second-degree appearances counted at 60 %. The UI groups this into: in several
+networks, research next (not researched yet), producers, engineers, songwriters, artists, emerging artists and
+connectors, with filters for role, location, genre and "hide people already in my database".
+
+A second-degree appearance reached only through another researched person is not counted again (that
+person's own network already counts it). Discover reads the stored result, which keeps each research's top 150
+direct and 150 second-degree people, so very large networks contribute their strongest people only.
+
+Entity merges after a research was stored are followed through `entity_redirects`, so old results still point
+at the right person.
+
+## Known limits
 
 - Coverage depends on community databases. Credits missing from MusicBrainz/Genius/Discogs won't appear.
 - Research is bounded by `FLAEVRD_MAX_*` settings. Raise them for deeper but slower searches

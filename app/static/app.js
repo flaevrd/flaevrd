@@ -46,12 +46,13 @@ let current = { sid: null, data: null, tab: "overview" };
 /* ---------------- router ---------------- */
 async function route() {
   clearInterval(poll);
+  clearInterval(expPoll);
   drawer.classList.add("hidden");
   const h = location.hash || "#/";
   const [_, page, id, sub] = h.split("/");
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active",
-    (a.dataset.nav === "search" && (page === "" || (page === "r" && !["network", "discover"].includes(sub)))) || a.dataset.nav === page ||
-    (a.dataset.nav === "explore" && sub === "network") || (a.dataset.nav === "discover" && sub === "discover") ||
+    (a.dataset.nav === "search" && (page === "" || (page === "r" && sub !== "network"))) || a.dataset.nav === page ||
+    (a.dataset.nav === "explore" && sub === "network") ||
     (a.dataset.nav === "people" && page === "p")));
   try {
     if (!page) return renderSearch();
@@ -59,10 +60,12 @@ async function route() {
     if (page === "p") return renderProfile(+id);
     if (page === "people") return renderPeople();
     if (page === "history") return renderHistory();
-    if (page === "explore" || page === "discover") {
+    if (page === "discover") return renderDiscover();
+    if (page === "compare") return renderCompare(id ? +id : null, sub ? +sub : null);
+    if (page === "explore") {
       const last = store.get("lastSession");
-      if (last) { location.hash = `#/r/${last}/${page === "explore" ? "network" : "discover"}`; return; }
-      view.innerHTML = `<div class="hero"><h1>No research <em>yet</em></h1><p class="lede">Run a search first; the ${page === "explore" ? "network explorer" : "discovery view"} opens on your latest research.</p><div><a class="btn primary" href="#/">Start a search</a></div></div>`;
+      if (last) { location.hash = `#/r/${last}/network`; return; }
+      view.innerHTML = `<div class="hero"><h1>No research <em>yet</em></h1><p class="lede">Run a search first; the network explorer opens on your latest research.</p><div><a class="btn primary" href="#/">Start a search</a></div></div>`;
       return;
     }
   } catch (e) {
@@ -167,7 +170,7 @@ function drawResearch() {
       <div class="stat"><b>${c.second}</b><span>2nd degree</span></div>
       <div class="stat"><b>${c.sources}</b><span>Sources</span></div>
     </div>
-    <div style="display:flex;gap:8px">${d.saved ? "" : `<button class="btn small" id="save-r">Save as research project</button>`}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${r.root_entity_id ? `<a class="btn small" href="#/compare/${r.root_entity_id}">Compare with…</a>` : ""}${d.saved ? "" : `<button class="btn small" id="save-r">Save as research project</button>`}</div>
   </div>
   <div class="tabs">${[["overview", "Overview"], ["people", "People & Credits"], ["network", "Network Graph"], ["discover", "Similar Network"], ["contacts", "Contact Information"], ["sources", "Sources"]].map(([k, l]) => `<button data-t="${k}" class="${k === tab ? "on" : ""}">${l}</button>`).join("")}</div>
   <div id="tab"></div>`;
@@ -298,69 +301,140 @@ function tabPeople(r) {
 }
 
 /* ---------------- network graph ---------------- */
+const graphState = { show2: false, showX: true, focus: null };
+let expPoll = null;
+const CONCENTRIC = (n) => 4 - n.data("degree");
+const DEGREE_TEXT = { 0: "Centre", 1: "Direct connection", 2: "Second degree", 3: "Further out" };
+
+function expStrip(xs) {
+  const run = (xs || []).filter((x) => x.status === "running");
+  const failed = (xs || []).filter((x) => x.status === "failed");
+  return (run.length ? `<div class="strip"><span class="spinner"></span>Expanding ${run.map((x) => `<b>${esc(x.name)}</b>`).join(", ")} … collecting their credits (MusicBrainz is 1 request/second, so this takes a minute or two). The graph updates when it's done.</div>` : "") +
+    (failed.length ? `<div class="warn" style="margin-bottom:10px">Expansion failed for ${failed.map((x) => esc(x.name)).join(", ")}. See the research log on the Overview tab, or try again.</div>` : "");
+}
+
+function watchExpansions(sid) {
+  clearInterval(expPoll);
+  expPoll = setInterval(async () => {
+    if (current.sid !== sid) { clearInterval(expPoll); return; }
+    let xs;
+    try { xs = await api(`/api/research/${sid}/expansions`); } catch { return; }
+    const el = $("#exp-strip"); if (el) el.innerHTML = expStrip(xs);
+    if (!xs.some((x) => x.status === "running")) {
+      clearInterval(expPoll);
+      const d = await api(`/api/research/${sid}`);
+      if (current.sid === sid) { current.data = d; if (current.tab === "network") drawResearch(); }
+    }
+  }, 2500);
+}
+
+async function expandNode(eid, btn) {
+  const sid = current.sid;
+  if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>Expanding…`; }
+  try {
+    await api(`/api/research/${sid}/expand/${eid}`, { method: "POST" });
+    graphState.focus = String(eid); graphState.showX = true;
+    const xs = await api(`/api/research/${sid}/expansions`);
+    current.data.expansions = xs;
+    const el = $("#exp-strip"); if (el) el.innerHTML = expStrip(xs);
+    watchExpansions(sid);
+  } catch (e) { if (btn) { btn.disabled = false; btn.textContent = "Could not expand"; } }
+}
+
 function tabNetwork(r) {
   const t = $("#tab");
   if (!r.graph || !window.cytoscape) { t.innerHTML = `<div class="empty">${window.cytoscape ? "No graph for this research." : "Graph library failed to load (offline?)."}</div>`; return; }
   const g = r.graph;
+  const xs = current.data.expansions || [];
+  const lookup = [...r.direct, ...r.second, ...(r.expanded_people || [])];
   const groups = [...new Set(g.nodes.map((n) => n.group))];
   const locs = [...new Set(g.nodes.map((n) => n.location).filter(Boolean))].sort();
   const genres = [...new Set(g.nodes.flatMap((n) => n.genres || []))].sort();
-  t.innerHTML = `<div class="graph-wrap">
+  const expandedDone = xs.filter((x) => x.status === "done");
+  t.innerHTML = `<div id="exp-strip">${expStrip(xs)}</div><div class="graph-wrap">
     <div class="graph-side">
       <h3>Search in network</h3><input type="text" id="gs" placeholder="Name…">
       <h3>Layers</h3>
-      <label><input type="checkbox" id="g2" ${g.nodes.some((n) => n.degree === 2) ? "" : "disabled"}> Show 2nd-degree</label>
+      <label><input type="checkbox" id="g2" ${g.nodes.some((n) => n.degree === 2 && !n.expanded_from) ? "" : "disabled"} ${graphState.show2 ? "checked" : ""}> Show 2nd-degree</label>
+      <label><input type="checkbox" id="gx" ${g.nodes.some((n) => n.expanded_from) ? "" : "disabled"} ${graphState.showX ? "checked" : ""}> Show expanded people</label>
       <h3>Roles</h3>${groups.map((gr) => `<label><input type="checkbox" class="gr" value="${esc(gr)}" checked><span class="legend-dot" style="background:var(--${esc(gr)})"></span>${esc(GROUP_NAME[gr] || gr)}</label>`).join("")}
       <h3>Min. strength <span id="msv" class="mono">0</span></h3><input type="range" id="ms" min="0" max="100" value="0" style="width:100%">
       <h3>Location</h3><select id="gl"><option value="">Any</option>${locs.map((l) => `<option>${esc(l)}</option>`).join("")}</select>
       <h3>Genre</h3><select id="gg"><option value="">Any</option>${genres.map((l) => `<option>${esc(l)}</option>`).join("")}</select>
-      <p class="faint" style="font-size:12px;margin-top:16px">Solid edges: direct credits. Dashed: second-degree, through the person they connect via. Location/genre filters only apply to people whose profile has that data.</p>
+      ${expandedDone.length ? `<h3>Expanded</h3>${expandedDone.map((x) => `<div style="font-size:13px;padding:2px 0"><a href="#" data-focus="${x.entity_id}">${esc(x.name)}</a> <span class="faint mono">${x.tracks} tracks</span></div>`).join("")}` : ""}
+      <p class="faint" style="font-size:12px;margin-top:16px">Click a person, then <b>Expand network</b> to research them and add their own collaborators to this graph. Solid edges: direct credits. Dashed: second degree. Dotted: found by expanding a person (double ring).</p>
     </div>
     <div id="cy"></div>
-    <div class="graph-info" id="gi"><h3 style="font:500 10px var(--mono);letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin:0 0 8px">Selection</h3><div class="muted">Click a person or a connection to see why it exists.</div></div>
+    <div class="graph-info" id="gi"><h3 style="font:500 10px var(--mono);letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin:0 0 8px">Selection</h3><div class="muted">Click a person or a connection to see why it exists. Expand any person to grow the network from there.</div></div>
   </div>`;
   const color = (gr) => css(`--${gr}`) || css("--other");
   cy = cytoscape({
     container: $("#cy"),
     elements: [
-      ...g.nodes.map((n) => ({ data: { ...n, id: String(n.id), size: n.degree === 0 ? 46 : 14 + (n.strength || 0) / 5, color: color(n.group) } })),
+      ...g.nodes.map((n) => ({ data: { ...n, id: String(n.id), size: n.degree === 0 ? 46 : 14 + (n.strength || 0) / 5, color: color(n.group), xfrom: n.expanded_from ? 1 : 0, xd: n.expanded ? 1 : 0 } })),
       ...g.edges.map((e, i) => ({ data: { ...e, id: `e${i}`, source: String(e.source), target: String(e.target), w: 0.5 + (e.strength || 0) / 30 } })),
     ],
     style: [
       { selector: "node", style: { "background-color": "data(color)", width: "data(size)", height: "data(size)", label: "data(label)", color: "#ece8de", "font-size": 10, "font-family": "Inter", "text-valign": "bottom", "text-margin-y": 4, "text-outline-width": 2, "text-outline-color": "#0d0d0b", "min-zoomed-font-size": 7 } },
       { selector: "node[degree = 0]", style: { "font-size": 14, "font-weight": 600, "border-width": 3, "border-color": "#e9b949" } },
-      { selector: "node[degree = 2]", style: { opacity: 0.85, "border-width": 1, "border-color": "#3a3832" } },
+      { selector: "node[degree >= 2]", style: { opacity: 0.85, "border-width": 1, "border-color": "#3a3832" } },
+      { selector: "node[xd = 1]", style: { "border-width": 4, "border-style": "double", "border-color": "#e9b949" } },
       { selector: "node[type = 'label'], node[type = 'studio']", style: { shape: "round-rectangle" } },
       { selector: "edge", style: { width: "data(w)", "line-color": "#3a3832", "curve-style": "bezier", opacity: 0.8 } },
       { selector: "edge[kind = 'indirect']", style: { "line-style": "dashed", opacity: 0.5 } },
+      { selector: "edge[kind = 'expanded']", style: { "line-style": "dotted", "line-color": "#6b6658", opacity: 0.7 } },
       { selector: ".hl", style: { "border-width": 3, "border-color": "#e9b949" } },
       { selector: "edge.hl", style: { "line-color": "#e9b949", opacity: 1 } },
       { selector: ".dim", style: { opacity: 0.12 } },
     ],
-    layout: { name: "concentric", concentric: (n) => 3 - n.data("degree"), levelWidth: () => 1, minNodeSpacing: 14, animate: false },
-    wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 1.6,
+    layout: { name: "concentric", concentric: CONCENTRIC, levelWidth: () => 1, minNodeSpacing: 14, animate: false },
+    wheelSensitivity: 0.25, minZoom: 0.15, maxZoom: 1.6,
   });
-  const apply = () => {
-    const show2 = $("#g2").checked;
+  const select = (node) => {
+    const d = node.data();
+    cy.elements().removeClass("hl dim");
+    const nb = node.closedNeighborhood();
+    cy.elements().not(nb).addClass("dim"); nb.addClass("hl");
+    const p = lookup.find((x) => String(x.id) === d.id);
+    const x = xs.find((e) => String(e.entity_id) === d.id);
+    const from = d.expanded_from ? g.nodes.find((n) => n.id === d.expanded_from) : null;
+    const expandBtn = d.degree === 0 ? "" : x?.status === "running" ? `<button class="btn small" disabled><span class="spinner"></span>Expanding…</button>`
+      : `<button class="btn small primary" id="xp" data-id="${esc(d.id)}">${x?.status === "done" ? "Expand again (refresh)" : "Expand network"}</button>`;
+    $("#gi").innerHTML = `<div class="eyebrow">${esc(DEGREE_TEXT[d.degree] || "")}${from ? ` · found by expanding ${esc(from.label)}` : ""}</div>
+      <h2 style="font:400 26px var(--serif);margin:4px 0 8px">${esc(d.label)}</h2>
+      ${p ? `<div class="roles">${roleChips(p.roles)}</div><p class="why">${esc(p.summary || p.why || "")}</p>${p.summary && p.why ? `<p class="why faint">${esc(p.why)}</p>` : ""}` : ""}
+      ${d.location ? `<p class="muted">📍 ${esc(d.location)}</p>` : ""}
+      ${p?.paths ? p.paths.map((x) => `<p class="why"><span class="chip">${esc(x.type)}</span> ${esc(x.explanation)}</p>`).join("") : ""}
+      ${p?.evidence ? `<ul style="padding-left:16px">${p.evidence.slice(0, 6).map((e) => `<li>${esc(e.title)} <span class="faint">${e.year || ""}</span> <span class="prov">${provLinks(e.sources)}</span></li>`).join("")}</ul>` : ""}
+      ${d.xd ? `<p class="faint" style="font-size:12px">Expanded: ${node.outgoers("edge[kind = 'expanded']").length} links from this person in the graph.</p>` : ""}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">${expandBtn}<a class="btn small" href="#/p/${esc(d.id)}">Open profile</a><a class="btn small" href="#/compare/${esc(String(r.root_entity_id))}/${esc(d.id)}">Compare with ${esc(r.root_name || "centre")}</a><button class="ghost small" data-research="${esc(d.id)}">New search from here →</button></div>`;
+    wireResearchButtons($("#gi"));
+    const xb = $("#xp"); if (xb) xb.onclick = () => expandNode(xb.dataset.id, xb);
+  };
+  const apply = (relayout = true) => {
+    graphState.show2 = $("#g2").checked; graphState.showX = $("#gx").checked;
     const okG = new Set([...document.querySelectorAll(".gr:checked")].map((x) => x.value));
     const ms = +$("#ms").value; $("#msv").textContent = ms;
     const loc = $("#gl").value, gen = $("#gg").value;
     cy.batch(() => {
       cy.nodes().forEach((n) => {
         const d = n.data();
-        const vis = d.degree === 0 || ((show2 || d.degree === 1) && okG.has(d.group) && (d.strength || 0) >= ms &&
+        const layer = d.degree === 1 || (d.xfrom ? graphState.showX : d.degree === 2 && graphState.show2) || d.xd;
+        const vis = d.degree === 0 || (layer && okG.has(d.group) && (d.strength || 0) >= ms &&
           (!loc || d.location === loc) && (!gen || (d.genres || []).includes(gen)));
         n.style("display", vis ? "element" : "none");
       });
-      cy.nodes().filter((n) => n.data("degree") === 2 && n.style("display") === "element").forEach((n) => {
-        if (!n.incomers("node").some((p) => p.style("display") === "element")) n.style("display", "none");
-      });
+      for (const deg of [2, 3]) {
+        cy.nodes().filter((n) => n.data("degree") === deg && n.style("display") === "element").forEach((n) => {
+          if (!n.incomers("node").some((p) => p.style("display") === "element")) n.style("display", "none");
+        });
+      }
     });
-    cy.layout({ name: "concentric", concentric: (n) => 3 - n.data("degree"), levelWidth: () => 1, minNodeSpacing: 14, animate: true, animationDuration: 300, eles: cy.elements(":visible"), fit: true, padding: 40 }).run();
+    if (relayout) cy.layout({ name: "concentric", concentric: CONCENTRIC, levelWidth: () => 1, minNodeSpacing: 14, animate: true, animationDuration: 300, eles: cy.elements(":visible"), fit: true, padding: 40 }).run();
   };
-  ["g2", "ms", "gl", "gg"].forEach((id) => $("#" + id).addEventListener("input", apply));
+  ["g2", "gx", "ms", "gl", "gg"].forEach((id) => $("#" + id).addEventListener("input", () => apply()));
   apply();
-  document.querySelectorAll(".gr").forEach((x) => x.addEventListener("change", apply));
+  document.querySelectorAll(".gr").forEach((x) => x.addEventListener("change", () => apply()));
   $("#gs").oninput = (e) => {
     const q = e.target.value.toLowerCase();
     cy.elements().removeClass("hl dim");
@@ -368,26 +442,19 @@ function tabNetwork(r) {
     const hit = cy.nodes().filter((n) => n.data("label").toLowerCase().includes(q));
     cy.elements().not(hit).addClass("dim"); hit.addClass("hl");
   };
-  cy.on("tap", "node", (ev) => {
-    const d = ev.target.data();
-    cy.elements().removeClass("hl dim");
-    const nb = ev.target.closedNeighborhood();
-    cy.elements().not(nb).addClass("dim"); nb.addClass("hl");
-    const p = [...r.direct, ...r.second].find((x) => String(x.id) === d.id);
-    $("#gi").innerHTML = `<div class="eyebrow">${d.degree === 0 ? "Centre" : d.degree === 1 ? "Direct connection" : "Second degree"}</div>
-      <h2 style="font:400 26px var(--serif);margin:4px 0 8px">${esc(d.label)}</h2>
-      ${p ? `<div class="roles">${roleChips(p.roles)}</div><p class="why">${esc(p.summary || p.why || "")}</p>` : ""}
-      ${d.location ? `<p class="muted">📍 ${esc(d.location)}</p>` : ""}
-      ${p?.paths ? p.paths.map((x) => `<p class="why"><span class="chip">${esc(x.type)}</span> ${esc(x.explanation)}</p>`).join("") : ""}
-      ${p?.evidence ? `<ul style="padding-left:16px">${p.evidence.slice(0, 6).map((e) => `<li>${esc(e.title)} <span class="faint">${e.year || ""}</span></li>`).join("")}</ul>` : ""}
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><a class="btn small" href="#/p/${esc(d.id)}">Open profile</a><button class="btn small" data-research="${esc(d.id)}">Research from here →</button></div>`;
-    wireResearchButtons($("#gi"));
-  });
+  t.querySelectorAll("[data-focus]").forEach((a) => a.onclick = (e) => { e.preventDefault(); const n = cy.getElementById(a.dataset.focus); if (n.nonempty()) { select(n); cy.animate({ center: { eles: n }, zoom: 1 }, { duration: 300 }); } });
+  cy.on("tap", "node", (ev) => select(ev.target));
   cy.on("tap", "edge", (ev) => {
     const d = ev.target.data();
-    $("#gi").innerHTML = `<div class="eyebrow">${d.kind === "direct" ? "Direct relationship" : "Second-degree link"}</div><p><span class="chip">${esc(d.label)}</span> <span class="mono">strength ${d.strength}</span></p><p class="why">${esc(d.text)}</p>`;
+    $("#gi").innerHTML = `<div class="eyebrow">${{ direct: "Direct relationship", indirect: "Second-degree link", expanded: "Found by expanding" }[d.kind] || ""}</div><p><span class="chip">${esc(d.label)}</span> <span class="mono">strength ${d.strength}</span></p><p class="why">${esc(d.text)}</p>`;
   });
   cy.on("tap", (ev) => { if (ev.target === cy) cy.elements().removeClass("hl dim"); });
+  if (graphState.focus) {
+    const n = cy.getElementById(graphState.focus);
+    graphState.focus = null;
+    if (n.nonempty()) setTimeout(() => { select(n); cy.animate({ center: { eles: n }, zoom: 0.9 }, { duration: 400 }); }, 350);
+  }
+  if (xs.some((x) => x.status === "running")) watchExpansions(current.sid);
 }
 
 function tabDiscover(r) {
@@ -462,6 +529,7 @@ async function renderProfile(id) {
       <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
         <button class="btn" id="refresh">${p.profiled_at ? "Refresh profile" : "Fetch background, contacts & metrics"}</button>
         <button class="btn primary" data-research="${p.id}">Research this network →</button>
+        <a class="btn" href="#/compare/${p.id}">Compare with…</a>
       </div>
     </div>
     <div class="panel">
@@ -549,6 +617,168 @@ async function renderHistory() {
     <div class="panel" style="margin-top:20px"><h3>Research projects</h3><table class="data"><tbody>${saved.map(row).join("") || `<tr><td class="empty">Save a research session as a project from its results page.</td></tr>`}</tbody></table></div>
     <div class="panel"><h3>History</h3><table class="data"><tbody>${recent.map(row).join("") || `<tr><td class="empty">No searches yet.</td></tr>`}</tbody></table></div>`;
   view.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => { if (confirm("Delete this research session? People and credits stay in the database.")) { await api(`/api/research/${b.dataset.del}`, { method: "DELETE" }); renderHistory(); } });
+}
+
+/* ---------------- compare two networks ---------------- */
+function personPicker(el, initial, onPick) {
+  el.innerHTML = `<div class="picker"><input placeholder="Type a name from your database…" value="${esc(initial?.name || "")}"><div class="pick-list hidden"></div></div>`;
+  const inp = $("input", el), list = $(".pick-list", el);
+  let timer = null;
+  const show = async () => {
+    const q = inp.value.trim();
+    const rows = await api(`/api/people?q=${encodeURIComponent(q)}&limit=12`);
+    list.innerHTML = rows.map((r) => `<div class="pick" data-id="${r.id}" data-name="${esc(r.name)}"><b>${esc(r.name)}</b> <span class="faint">${esc(r.disambiguation || r.entity_type)} · ${r.n} tracks${r.researched ? " · researched" : ""}</span></div>`).join("") || `<div class="faint" style="padding:8px">Nobody by that name in your database yet. Search them first.</div>`;
+    list.classList.remove("hidden");
+    list.querySelectorAll(".pick").forEach((x) => x.onmousedown = () => { inp.value = x.dataset.name; list.classList.add("hidden"); onPick(+x.dataset.id); });
+  };
+  inp.oninput = () => { clearTimeout(timer); timer = setTimeout(show, 200); };
+  inp.onfocus = show;
+  inp.onblur = () => setTimeout(() => list.classList.add("hidden"), 150);
+}
+
+async function renderCompare(a, b) {
+  const hist = await api("/api/research");
+  const roots = [];
+  hist.filter((h) => h.status === "done" && h.root_entity_id).forEach((h) => { if (!roots.some((x) => x.id === h.root_entity_id)) roots.push({ id: h.root_entity_id, name: h.root_name }); });
+  const nameOf = async (id) => id ? (await api(`/api/people/${id}`).catch(() => null)) : null;
+  const [pa, pb] = await Promise.all([nameOf(a), nameOf(b)]);
+  view.innerHTML = `<div class="rhead"><div><div class="eyebrow">Network comparison</div><h1>Compare <em>two networks</em></h1>
+      <p class="muted" style="max-width:640px">Who both people work with, how their circles connect, and who each one knows that the other doesn't. Built from credits in your database and their latest research.</p></div></div>
+    <div class="cmp-pick"><div id="pa"></div><span class="vs">vs</span><div id="pb"></div></div>
+    ${roots.length ? `<div class="muted" style="font-size:12px;margin:8px 0 0">Researched: ${roots.slice(0, 14).map((r) => `<a href="#" class="chip quick" data-id="${r.id}">${esc(r.name)}</a>`).join(" ")}</div>` : ""}
+    <div id="cmp"></div>`;
+  const go = (na, nb) => { if (na && nb && na !== nb) location.hash = `#/compare/${na}/${nb}`; else if (na || nb) history.replaceState(null, "", `#/compare/${na || nb}`); };
+  let A = a, B = b;
+  personPicker($("#pa"), pa, (id) => { A = id; go(A, B); });
+  personPicker($("#pb"), pb, (id) => { B = id; go(A, B); });
+  view.querySelectorAll(".quick").forEach((q) => q.onclick = (e) => { e.preventDefault(); const id = +q.dataset.id; if (!A) A = id; else B = id; if (A && B) go(A, B); else renderCompare(A, B); });
+  if (!a || !b) { $("#cmp").innerHTML = `<div class="empty" style="margin-top:24px">Pick ${a ? "a second person" : "two people"} to compare.</div>`; return; }
+  $("#cmp").innerHTML = `<div class="muted" style="margin-top:20px"><span class="spinner"></span>Comparing networks…</div>`;
+  let c;
+  try { c = await api(`/api/compare?a=${a}&b=${b}`); } catch (e) { $("#cmp").innerHTML = `<div class="warn">${esc(e.message)}</div>`; return; }
+  const o = c.overlap;
+  const side = (x, who) => x ? `<div class="side"><span class="mono faint">${esc(who)}</span> <b class="mono">${x.strength}</b> ${x.degree === 2 ? `<span class="chip">2nd via ${esc(x.via || "?")}</span>` : `<span class="chip">${esc(x.relationship || "direct")}</span>`}
+      <div class="why">${esc(x.summary || x.why || "")}</div>${x.evidence ? `<div class="prov">${x.evidence.map((e) => `${esc(e.title)}${e.year ? ` (${e.year})` : ""} ${provLinks(e.sources)}`).join(" · ")}</div>` : ""}</div>` : "";
+  const sharedRow = (r) => `<div class="person-row" style="grid-template-columns:44px 1fr auto"><div class="score">${r.score}<small>min</small><div class="bar"><i style="width:${r.score}%"></i></div></div>
+      <div><a class="name" href="#/p/${r.id}">${esc(r.name)}</a> <span class="chip g-${esc(r.group)}">${esc(GROUP_NAME[r.group] || r.group)}</span><div class="roles">${roleChips(r.roles)}</div>
+      <div class="cmp-sides">${side(r.a, c.a.name)}${side(r.b, c.b.name)}</div></div>
+      <div><button class="ghost small" data-research="${r.id}">Research →</button></div></div>`;
+  const simpleRow = (r) => `<div class="person-row" style="grid-template-columns:44px 1fr auto"><div class="score">${r.score}<div class="bar"><i style="width:${r.score}%"></i></div></div>
+      <div><a class="name" href="#/p/${r.id}">${esc(r.name)}</a> <span class="chip g-${esc(r.group)}">${esc(GROUP_NAME[r.group] || r.group)}</span><div class="roles">${roleChips(r.roles)}</div><div class="why">${esc(r.why)}</div></div>
+      <div><button class="ghost small" data-research="${r.id}">Research →</button></div></div>`;
+  const more = (items, render, n = 10) => items.slice(0, n).map(render).join("") +
+    (items.length > n ? `<details class="ev"><summary>Show ${items.length - n} more</summary>${items.slice(n).map(render).join("")}</details>` : "");
+  const headCard = (h) => `<div><h2 style="font:400 30px var(--serif);margin:0"><a class="name" href="#/p/${h.id}">${esc(h.name)}</a></h2><div class="muted mono" style="font-size:12px">${h.tracks} credited tracks · ${h.direct} direct · ${h.second} 2nd degree ${h.session_id ? `· <a href="#/r/${h.session_id}">research</a>` : `· <button class="ghost small" data-research="${h.id}">Research now →</button>`}</div></div>`;
+  $("#cmp").innerHTML = `
+    <div class="cmp-head">${headCard(c.a)}<div class="stats">
+      <div class="stat"><b>${o.shared_direct}</b><span>Shared collaborators</span></div>
+      <div class="stat"><b>${o.jaccard}%</b><span>Overlap</span></div>
+      <div class="stat"><b>${c.bridges.length}</b><span>Bridges</span></div>
+      <div class="stat"><b>${o.shared_extended}</b><span>Shared 2nd degree</span></div></div>${headCard(c.b)}</div>
+    ${c.notes.map((n) => `<div class="warn" style="margin:10px 0">${esc(n)}</div>`).join("")}
+    ${c.direct_link ? `<div class="panel"><h3>Direct link · strength ${c.direct_link.strength}</h3><p class="why">${esc(c.direct_link.summary)}. ${esc(c.direct_link.why)}.</p><ul>${c.direct_link.evidence.map((e) => `<li><b>${esc(e.title)}</b> <span class="muted">${e.year || ""}</span> <span class="prov">${provLinks(e.sources)}</span></li>`).join("")}</ul></div>`
+      : `<p class="muted">No shared track between ${esc(c.a.name)} and ${esc(c.b.name)} in the researched credits.</p>`}
+    <div class="panel"><h3>Network map</h3><p class="faint" style="font-size:12px;margin:0 0 8px">Left: only ${esc(c.a.name)}. Middle: shared collaborators. Right: only ${esc(c.b.name)}. Gold links are bridges (a collaborator of each who worked together).</p><div id="cy-cmp"></div></div>
+    <div class="grid2">
+      <div>
+        <div class="panel"><h3>Shared collaborators · ${c.shared_direct.length}</h3><p class="faint" style="font-size:12px;margin:0 0 8px">Credited with both. Score = the weaker of the two relationships.${Object.keys(o.by_group).length ? " " + Object.entries(o.by_group).map(([g, n]) => `${n} ${esc((GROUP_NAME[g] || g).toLowerCase())}`).join(", ") + "." : ""}</p>${more(c.shared_direct, sharedRow) || `<div class="empty">No collaborator is credited with both in the researched credits.</div>`}</div>
+        <div class="panel"><h3>Bridges · ${c.bridges.length}</h3><p class="faint" style="font-size:12px;margin:0 0 8px">A collaborator of ${esc(c.a.name)} who worked with a collaborator of ${esc(c.b.name)}. Score = weakest link in the chain.</p>${more(c.bridges, (br) => `
+          <div style="padding:9px 0;border-top:1px solid var(--line)"><span class="mono faint" style="float:right">${br.score}</span>
+          <a class="name" href="#/p/${br.x.id}">${esc(br.x.name)}</a> ⇄ <a class="name" href="#/p/${br.y.id}">${esc(br.y.name)}</a>
+          <div class="why">${esc(br.why)}</div><div class="prov">${br.middle.evidence.map((e) => `${esc(e.title)} ${provLinks(e.sources)}`).join(" · ")}</div></div>`) || `<div class="empty">No bridges found between the two direct networks.</div>`}</div>
+        <div class="panel"><h3>In both extended networks · ${c.shared_extended.length}</h3>${more(c.shared_extended, sharedRow) || `<div class="empty">None. Second-degree overlap needs both people researched with “+ 2nd degree”.</div>`}</div>
+      </div>
+      <div>
+        <div class="panel"><h3>Only ${esc(c.a.name)} · ${c.only_a.length}</h3>${more(c.only_a, simpleRow) || `<div class="empty">—</div>`}</div>
+        <div class="panel"><h3>Only ${esc(c.b.name)} · ${c.only_b.length}</h3>${more(c.only_b, simpleRow) || `<div class="empty">—</div>`}</div>
+      </div>
+    </div>`;
+  wireResearchButtons($("#cmp"));
+  drawCompareGraph(c);
+}
+
+function drawCompareGraph(c) {
+  if (!window.cytoscape || !c.graph.nodes.length) return;
+  const cols = { aonly: -260, a: 0, bx: 230, shared: 420, by: 610, b: 840, bonly: 1100 };
+  const bridgeX = new Set(c.bridges.slice(0, 12).map((b) => b.x.id)), bridgeY = new Set(c.bridges.slice(0, 12).map((b) => b.y.id));
+  const colOf = (n) => n.id === c.a.id ? "a" : n.id === c.b.id ? "b" : n.side === "shared" ? "shared" : bridgeX.has(n.id) ? "bx" : bridgeY.has(n.id) ? "by" : n.side === "a" ? "aonly" : "bonly";
+  const byCol = {};
+  c.graph.nodes.forEach((n) => (byCol[colOf(n)] = byCol[colOf(n)] || []).push(n));
+  const pos = {};
+  Object.entries(byCol).forEach(([col, list]) => list.forEach((n, i) => { pos[n.id] = { x: cols[col] + (col.endsWith("only") ? (i % 2) * 60 : 0), y: (i - (list.length - 1) / 2) * 40 }; }));
+  const color = (gr) => css(`--${gr}`) || css("--other");
+  const g = cytoscape({
+    container: $("#cy-cmp"),
+    elements: [
+      ...c.graph.nodes.map((n) => ({ data: { ...n, id: String(n.id), centre: n.id === c.a.id || n.id === c.b.id ? 1 : 0, size: n.id === c.a.id || n.id === c.b.id ? 44 : 12 + (n.strength || 0) / 6, color: color(n.group) }, position: pos[n.id] })),
+      ...c.graph.edges.map((e, i) => ({ data: { ...e, id: `c${i}`, source: String(e.source), target: String(e.target), w: 0.5 + (e.strength || 0) / 35 } })),
+    ],
+    style: [
+      { selector: "node", style: { "background-color": "data(color)", width: "data(size)", height: "data(size)", label: "data(label)", color: "#ece8de", "font-size": 10, "font-family": "Inter", "text-valign": "bottom", "text-margin-y": 4, "text-outline-width": 2, "text-outline-color": "#0d0d0b" } },
+      { selector: "node[centre = 1]", style: { "font-size": 14, "font-weight": 600, "border-width": 3, "border-color": "#e9b949" } },
+      { selector: "edge", style: { width: "data(w)", "line-color": "#3a3832", "curve-style": "bezier", opacity: 0.8 } },
+      { selector: "edge[kind = 'bridge']", style: { "line-color": "#e9b949", opacity: 0.9 } },
+    ],
+    layout: { name: "preset", fit: true, padding: 30 }, wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 1.6,
+  });
+  g.on("tap", "node", (ev) => { location.hash = `#/p/${ev.target.id()}`; });
+}
+
+/* ---------------- discover across all research ---------------- */
+async function renderDiscover() {
+  const savedOnly = store.get("discSaved") === "1";
+  view.innerHTML = `<div class="muted"><span class="spinner"></span>Reading all your research…</div>`;
+  const d = await api(`/api/discover?saved_only=${savedOnly}`);
+  if (!d.networks.length) {
+    view.innerHTML = `<div class="hero"><h1>Nothing to <em>discover</em> yet</h1><p class="lede">${savedOnly ? "No saved research projects yet. Switch to all research, or save one from its results page." : "Discover looks across all your finished research. Run a search or two first."}</p><div style="display:flex;gap:8px">${savedOnly ? `<button class="btn" id="all">Use all research</button>` : ""}<a class="btn primary" href="#/">Start a search</a></div></div>`;
+    const b = $("#all"); if (b) b.onclick = () => { store.set("discSaved", "0"); renderDiscover(); };
+    return;
+  }
+  const f = JSON.parse(store.get("discF") || "{}");
+  const locs = [...new Set(d.people.map((p) => p.location || p.country).filter(Boolean))].sort();
+  const genres = [...new Set(d.people.flatMap((p) => p.genres))].sort();
+  view.innerHTML = `<div class="rhead"><div><div class="eyebrow">Discover · across ${d.networks.length} researched network${d.networks.length !== 1 ? "s" : ""}</div><h1>Who you should <em>know next</em></h1>
+      <div class="muted" style="font-size:12px;margin-top:6px">${d.networks.map((n) => `<a class="chip" href="#/r/${n.session_id}">${esc(n.title)}</a>`).join(" ")}</div></div></div>
+    <div class="filters">
+      <div class="seg" id="ds"><button data-v="0" class="${savedOnly ? "" : "on"}">All research</button><button data-v="1" class="${savedOnly ? "on" : ""}">Saved projects</button></div>
+      <select id="fg"><option value="">All roles</option>${["producer", "engineer", "writer", "artist", "musician"].map((g) => `<option value="${g}" ${f.g === g ? "selected" : ""}>${GROUP_NAME[g]}</option>`).join("")}</select>
+      <select id="fl"><option value="">Any location</option>${locs.map((l) => `<option ${f.l === l ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+      <select id="fge"><option value="">Any genre</option>${genres.map((l) => `<option ${f.ge === l ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+      <label class="muted"><input type="checkbox" id="fh" ${f.h ? "checked" : ""}> Hide people already in my database</label>
+      <input id="fq" placeholder="Filter by name…" value="${esc(f.q || "")}" style="max-width:200px">
+    </div>
+    <p class="faint" style="font-size:12px">${esc(d.basis)} Location and genre filters only match people whose profile has that data.</p>
+    <div id="disc"></div>`;
+  $("#ds").onclick = (e) => { const v = e.target.dataset.v; if (v != null) { store.set("discSaved", v); renderDiscover(); } };
+  const card = (x, extra = "") => `<div class="disc-item"><span class="mono faint" style="float:right" title="score">${x.score}</span>
+      <a class="name" href="#/p/${x.id}">${esc(x.name)}</a> <span class="chip g-${esc(x.group)}">${esc(GROUP_NAME[x.group] || x.group)}</span>
+      ${x.networks > 1 ? `<span class="chip">${x.networks} networks</span>` : ""}${x.crm ? `<span class="chip">${esc(CRM_TEXT[x.crm.status] || x.crm.status)}</span>` : ""}${x.researched ? `<span class="chip">researched</span>` : ""}
+      ${x.location || x.country ? `<span class="faint" style="font-size:12px"> 📍 ${esc(x.location || x.country)}</span>` : ""}
+      <div class="roles">${roleChips(x.roles)}</div><div class="why">${esc(x.why)}</div>${extra}</div>`;
+  const draw = () => {
+    const F = { g: $("#fg").value, l: $("#fl").value, ge: $("#fge").value, h: $("#fh").checked, q: $("#fq").value.trim().toLowerCase() };
+    store.set("discF", JSON.stringify(F));
+    const L = d.people.filter((p) => (!F.g || p.group === F.g) && (!F.l || p.location === F.l || p.country === F.l) && (!F.ge || p.genres.includes(F.ge)) && (!F.h || !p.crm) && (!F.q || p.name.toLowerCase().includes(F.q)));
+    const research = (x) => x.researched ? "" : `<div style="margin-top:6px"><button class="ghost small" data-research="${x.id}">Research →</button></div>`;
+    const sec = (title, hint, items, extra) => `<div class="panel"><h3>${title} · ${items.length}</h3>${hint ? `<p class="faint" style="margin:0 0 8px;font-size:12px">${hint}</p>` : ""}${items.slice(0, 8).map((x) => card(x, extra ? extra(x) : "")).join("")}${items.length > 8 ? `<details class="ev"><summary>Show ${Math.min(items.length, 40) - 8} more</summary>${items.slice(8, 40).map((x) => card(x, extra ? extra(x) : "")).join("")}</details>` : ""}${items.length ? "" : `<div class="empty">Nobody here with the current filters.</div>`}</div>`;
+    const multi = L.filter((x) => x.networks >= 2);
+    const next = L.filter((x) => !x.researched).sort((a, b) => b.score - a.score);
+    const byRole = (g) => L.filter((x) => x.group === g).sort((a, b) => b.score - a.score);
+    $("#disc").innerHTML = `<div class="cards">
+      ${sec("In several of your networks", "People who turn up around more than one of the people you researched. The more networks, the more central they are to the scene you are mapping.", multi)}
+      ${sec("Research next", "Not researched yet, ranked by how strongly they connect to everything you have researched.", next, research)}
+      ${sec("Producers", "", byRole("producer"), research)}
+      ${sec("Engineers", "", byRole("engineer"), research)}
+      ${sec("Songwriters", "", byRole("writer"), research)}
+      ${sec("Artists", "", byRole("artist"), research)}
+      ${sec("Emerging artists", "Flagged in at least one research: earliest release found is recent. A signal from the fetched credits, not a full discography.", L.filter((x) => x.flags.includes("emerging_artists")))}
+      ${sec("Connectors", "Linked to several collaborators of one researched person.", L.filter((x) => x.flags.includes("cross_network")))}
+    </div>`;
+    wireResearchButtons($("#disc"));
+  };
+  ["fg", "fl", "fge", "fh"].forEach((id) => $("#" + id).onchange = draw);
+  $("#fq").oninput = draw;
+  draw();
 }
 
 /* ---------------- provider status drawer ---------------- */
