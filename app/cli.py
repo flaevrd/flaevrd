@@ -279,7 +279,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m app.cli")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("lookup", help="research one person by name")
-    a.add_argument("query")
+    a.add_argument("query", nargs="?")
+    a.add_argument("--query-file", help="read the search text from this file (safer for automation than passing it inline)")
     a.add_argument("--depth", type=int, default=None, help="1 = quick, 2 = deep (default: quick unless the query starts with deep:)")
     a.add_argument("--out")
     b = sub.add_parser("summary", help="summarize an existing research session")
@@ -287,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--out")
     args = ap.parse_args(argv)
     if args.cmd == "lookup":
-        out = asyncio.run(lookup(args.query, args.depth))
+        q = open(args.query_file, encoding="utf-8").read().strip() if args.query_file else args.query
+        if not q:
+            ap.error("give a query or --query-file")
+        out = asyncio.run(lookup(q, args.depth))
     else:
         out = summarize(DB(settings.db_path), args.session_id)
     text = json.dumps(out, ensure_ascii=False)
