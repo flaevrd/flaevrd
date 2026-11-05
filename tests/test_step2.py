@@ -120,3 +120,22 @@ def test_compute_includes_graph_and_expansions():
     # Expanding a direct collaborator deepens second degree: X's other artist now shows up there
     assert nodes[ids["d"]]["degree"] == 2
     assert any(p["name"] == "Artist D" for p in res["second"])
+
+
+def test_cli_summary_is_plain_and_small():
+    from app.cli import summarize
+    from app.engine.research import Researcher
+    db, st, ids = _world()
+    r = Researcher(db, http=None)
+    sid = db.x("INSERT INTO research_sessions(query,target_kind,status,root_entity_id,created_at) "
+               "VALUES('Artist A','artist','done',?,?)", (ids["a"], now()))
+    for row in db.q("SELECT id FROM tracks"):
+        r._add_session_track(sid, row[0], None, 1)
+    db.x("UPDATE research_sessions SET result=? WHERE id=?", (json.dumps(r.compute(sid)), sid))
+    out = summarize(db, sid)
+    assert out["name"] == "Artist A"
+    prod = next(g for g in out["people"] if g["group"] == "producer")
+    p = prod["people"][0]
+    assert p["name"] == "Producer P" and p["songs_together"] == 2 and p["closeness"]
+    assert p["songs"][0]["source"].startswith("https://")
+    assert len(json.dumps(out)) < 240_000
