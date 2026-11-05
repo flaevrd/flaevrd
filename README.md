@@ -12,6 +12,13 @@ similar-network recommendations, and a basic people database with CSV export.
 **Step 2** adds network exploration: expand any person in the graph, compare two people's networks,
 and a Discover area that works across all your research.
 
+## Simple search page (no install)
+
+For everyday use there is a simple page on claude.ai: type a name, and about 5 minutes later you see who
+they work with, who to meet next, and how to reach them. A background job (a scheduled task in the Claude
+project) clones this branch and runs `python -m app.cli lookup "<name>"`. It then saves the plain-language
+summary (`app/cli.py`) into the page's database. Every connection keeps its songs and source links.
+
 ## Quick start
 
 ```bash
