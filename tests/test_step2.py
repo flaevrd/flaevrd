@@ -139,3 +139,28 @@ def test_cli_summary_is_plain_and_small():
     assert p["name"] == "Producer P" and p["songs_together"] == 2 and p["closeness"]
     assert p["songs"][0]["source"].startswith("https://")
     assert len(json.dumps(out)) < 240_000
+    assert "socials" in p and out["deep"] is True  # sessions default to depth 2
+
+
+def test_cli_query_prefixes():
+    from app.cli import parse_query
+    assert parse_query("Hit-Boy") == ("Hit-Boy", "artist", False)
+    assert parse_query("deep: Hit-Boy") == ("Hit-Boy", "artist", True)
+    assert parse_query("deep: song: Luther - Kendrick Lamar") == ("Luther - Kendrick Lamar", "song", True)
+    assert parse_query("Album:GNX") == ("GNX", "album", False)
+
+
+def test_socials_dedupe_and_instagram_handle():
+    from app.cli import socials
+    from app.providers.base import ContactRec, ProfileData
+    db, st, ids = _world()
+    p = ids["p"]
+    st.apply_profile(p, ProfileData(contacts=[
+        ContactRec("instagram", "https://www.instagram.com/producer.p", "publicly_listed", "genius", "https://genius.com/a/1", "Genius"),
+        ContactRec("instagram", "https://instagram.com/producer.p/", "publicly_listed", "discogs", "https://discogs.com/a/1", "Discogs"),
+        ContactRec("website", "https://producerp.com", "publicly_listed", "musicbrainz", "https://musicbrainz.org/a/1", "MB"),
+        ContactRec("x", "https://twitter.com/producerp", "publicly_listed", "musicbrainz", "https://musicbrainz.org/a/1", "MB"),
+    ]))
+    out = socials(db, p)
+    assert [s["kind"] for s in out] == ["instagram", "x", "website"]
+    assert out[0]["handle"] == "producer.p" and sorted(out[0]["found_on"]) == ["discogs", "genius"]

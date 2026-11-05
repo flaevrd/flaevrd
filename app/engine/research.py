@@ -27,6 +27,7 @@ EXPAND_PRIORITY = {"producer": 0, "engineer": 1, "writer": 2, "artist": 3, "musi
 
 class Researcher:
     def __init__(self, db: DB, http: Http):
+        self.profile_top: int | None = None  # how many top collaborators get a full profile (None = settings)
         self.db, self.http = db, http
         self.store = Store(db)
         self.mb = MusicBrainz(http)
@@ -468,7 +469,7 @@ class Researcher:
     async def enrich_top(self, sid: int, root: int) -> None:
         s = network.load_scope(self.db, self._session_track_ids(sid, 1))
         direct = [d for d in network.direct_network(s, root) if d["type"] in network.PERSONLIKE]
-        top = [d["id"] for d in direct[: settings.max_expansions]]
+        top = [d["id"] for d in direct[: settings.max_expansions if self.profile_top is None else self.profile_top]]
         if top:
             self.db.log(sid, f"Profiling top {len(top)} direct collaborators (background, location, contacts, metrics) …")
         for eid in top:
