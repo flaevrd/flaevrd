@@ -114,26 +114,29 @@ async def fetch_socials(r: Researcher, ids: list[int], log=None) -> None:
     sem = asyncio.Semaphore(6)
 
     async def one(eid: int) -> None:
-        eid = _current_id(r.db, eid)
-        e = r.db.one("SELECT name, profiled_at FROM entities WHERE id=?", (eid,))
+        cur = lambda: _current_id(r.db, eid)  # other people's profiles can merge this record while we wait on the network
+        e = r.db.one("SELECT name, profiled_at FROM entities WHERE id=?", (cur(),))
         if not e or e["profiled_at"]:
             return
         async with sem:
-            mbid = r.store.ident(eid, "musicbrainz")
-            if mbid:
-                a = await r._safe(None, "MusicBrainz profile", r.mb.artist(mbid))
-                if a:
-                    eid = r.store.apply_profile(eid, r.mb.profile_from_artist(a))
-            gid = r.store.ident(eid, "genius")
-            if gid and r.genius.configured():
-                g = await r._safe(None, "Genius profile", r.genius.artist(gid))
-                if g:
-                    eid = r.store.apply_profile(eid, r.genius.profile_from_artist(g))
-            did = r.store.ident(eid, "discogs")
-            if did and r.discogs.configured():
-                d = await r._safe(None, "Discogs profile", r.discogs.artist(did))
-                if d:
-                    r.store.apply_profile(eid, r.discogs.profile_from_artist(d))
+            try:
+                mbid = r.store.ident(cur(), "musicbrainz")
+                if mbid:
+                    a = await r._safe(None, "MusicBrainz profile", r.mb.artist(mbid))
+                    if a:
+                        r.store.apply_profile(cur(), r.mb.profile_from_artist(a))
+                gid = r.store.ident(cur(), "genius")
+                if gid and r.genius.configured():
+                    g = await r._safe(None, "Genius profile", r.genius.artist(gid))
+                    if g:
+                        r.store.apply_profile(cur(), r.genius.profile_from_artist(g))
+                did = r.store.ident(cur(), "discogs")
+                if did and r.discogs.configured():
+                    d = await r._safe(None, "Discogs profile", r.discogs.artist(did))
+                    if d:
+                        r.store.apply_profile(cur(), r.discogs.profile_from_artist(d))
+            except Exception as ex:  # one person's socials must never sink the whole search
+                print(f"socials skipped for entity {eid}: {type(ex).__name__}: {ex}", file=sys.stderr)
 
     await asyncio.gather(*(one(i) for i in dict.fromkeys(ids)))
 
