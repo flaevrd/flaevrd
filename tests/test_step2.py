@@ -144,8 +144,9 @@ def test_cli_summary_is_plain_and_small():
 
 def test_cli_query_prefixes():
     from app.cli import parse_query
-    assert parse_query("Hit-Boy") == ("Hit-Boy", "artist", False)
-    assert parse_query("deep: Hit-Boy") == ("Hit-Boy", "artist", True)
+    assert parse_query("Hit-Boy") == ("Hit-Boy", "auto", False)
+    assert parse_query("person: Hit-Boy") == ("Hit-Boy", "artist", False)
+    assert parse_query("deep: Hit-Boy") == ("Hit-Boy", "auto", True)
     assert parse_query("deep: song: Luther - Kendrick Lamar") == ("Luther - Kendrick Lamar", "song", True)
     assert parse_query("Album:GNX") == ("GNX", "album", False)
 

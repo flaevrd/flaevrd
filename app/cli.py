@@ -219,9 +219,14 @@ def summarize(db: DB, sid: int, alternatives: list[dict] | None = None) -> dict:
     return out
 
 
+PICK = re.compile(r"^pick:(musicbrainz|genius|discogs):(artist|song|album):(\S+)\s*", re.I)
+WHAT = {"artist": "person", "song": "song", "album": "album"}
+
+
 def parse_query(query: str) -> tuple[str, str, bool]:
-    """'deep: song: Name' -> ('Name', 'song', True). Prefixes are how the page asks for a song/album search or a deep one."""
-    q, kind, deep = query.strip(), "artist", False
+    """'deep: song: Name' -> ('Name', 'song', True). No prefix means 'auto': the tool works out whether the text is
+    a person, a song or an album. Prefixes are how the page asks for one reading in particular, or for a deep search."""
+    q, kind, deep = query.strip(), "auto", False
     while True:
         m = re.match(r"^(deep|song|album|person|artist)\s*:\s*", q, re.I)
         if not m:
@@ -234,6 +239,58 @@ def parse_query(query: str) -> tuple[str, str, bool]:
         q = q[m.end():].strip()
 
 
+def _alt(c: dict) -> dict:
+    """One other thing the search text could have meant; `query` re-runs the search for exactly that one."""
+    return {"name": c["title"], "about": c["subtitle"], "provider": c["provider"], "id": c["external_id"], "kind": WHAT[c["kind"]],
+            "query": f"pick:{c['provider']}:{c['kind']}:{c['external_id']} {c['title']}"}
+
+
+async def choose(r: Researcher, q: str, kind: str) -> tuple[dict | None, list[dict]]:
+    """Pick what to research for the search text, plus the other readings to offer. Nothing is guessed silently:
+    every alternative is returned so the page can show 'meant something else?'."""
+    nq = norm_name(q)
+    dashed = bool(split_query(q)[1])
+
+    def first(cands, k, prefer_genius=False):
+        lst = [c for c in cands if c["kind"] == k]
+        if prefer_genius:  # a bare song title matches thousands of songs; Genius ranks by popularity
+            lst = [c for c in lst if c["provider"] == "genius"] + [c for c in lst if c["provider"] != "genius"]
+        return lst
+
+    if kind != "auto":
+        cands = (await r.suggest(q, kind))["candidates"]
+        lst = first(cands, kind, kind == "song" and not dashed)
+        if kind == "artist":
+            lst = [c for c in lst if norm_name(c["title"]) == nq] + [c for c in lst if norm_name(c["title"]) != nq]
+        return (lst[0] if lst else None), [_alt(c) for c in lst[1:6]]
+
+    artists = [] if dashed else first((await r.suggest(q, "artist"))["candidates"], "artist")
+    res = await r.suggest(q, "auto")
+    songs, albums = first(res["candidates"], "song", not dashed), first(res["candidates"], "album")
+    sq = lambda t: re.sub(r"[^a-z0-9]", "", (t or "").lower())
+    exact = [c for c in artists if norm_name(c["title"]) == nq]
+    exact_work = [c for c in albums + songs if sq(c["title"]) == sq(q)]
+    if exact:
+        pick = exact[0]
+    elif dashed:
+        works = [c for c in res["candidates"] if c["kind"] in ("song", "album")]
+        pick = works[0] if works else None
+    elif res["detected"] in ("song", "album") and (songs if res["detected"] == "song" else albums):
+        pick = (songs if res["detected"] == "song" else albums)[0]
+    elif exact_work:
+        pick = exact_work[0]
+    else:
+        pick = (artists or songs or albums or [None])[0]
+    if pick is None:
+        return None, []
+    near = lambda c: sq(q) in sq(c["title"]) or sq(c["title"]) in sq(q)  # drop loose matches nobody meant
+    others = ([c for c in artists if c is not pick and near(c)][:3] + [c for c in songs if c is not pick and near(c)][:2]
+              + [c for c in albums if c is not pick and near(c)][:2])
+    if pick["kind"] != "artist":
+        others.sort(key=lambda c: c["kind"] != pick["kind"])
+    return pick, [_alt(c) for c in others]
+
+
 async def lookup(query: str, depth: int | None = None) -> dict:
     q, kind, deep = parse_query(query)
     if depth is None:
@@ -243,22 +300,19 @@ async def lookup(query: str, depth: int | None = None) -> dict:
     r = Researcher(db, http)
     if depth < 2:
         r.profile_top = 0  # quick search: socials for everyone shown (below) instead of full profiles for a few
-    what = {"artist": "person", "song": "song", "album": "album"}[kind]
     try:
         if not q:
             return {"error": "The search was empty."}
-        res = await r.suggest(q, kind)
-        cands = [c for c in res["candidates"] if c["kind"] == kind]
-        if not cands:
+        m = PICK.match(q)
+        if m:  # the person chose one exact candidate from 'meant something else?'
+            title = q[m.end():].strip() or m.group(3)
+            pick, alts = {"kind": m.group(2).lower(), "provider": m.group(1).lower(), "external_id": m.group(3), "title": title, "subtitle": ""}, []
+        else:
+            pick, alts = await choose(r, q, kind)
+        if pick is None:
+            what = "person, song or album" if kind == "auto" else WHAT[kind]
             return {"error": f"No {what} called “{q}” was found in MusicBrainz or Genius."}
-        nq = norm_name(q)
-        exact = [c for c in cands if norm_name(c["title"]) == nq] if kind == "artist" else []
-        if kind == "song" and not split_query(q)[1]:
-            # a bare song title matches thousands of songs; Genius ranks by popularity, MusicBrainz does not
-            exact = [c for c in cands if c["provider"] == "genius"]
-        pick = (exact or cands)[0]
-        alts = [{"name": c["title"], "about": c["subtitle"], "provider": c["provider"], "id": c["external_id"]}
-                for c in cands if c is not pick][:5]
+        kind = pick["kind"]
         sid = r.start(pick["title"], kind, pick["provider"], pick["external_id"], depth)
         await r.jobs[sid]
         row = db.one("SELECT status, log, result FROM research_sessions WHERE id=?", (sid,))
@@ -267,9 +321,9 @@ async def lookup(query: str, depth: int | None = None) -> dict:
             return {"error": "The research did not finish. " + (last[0] if last else "")}
         await fetch_socials(r, shown_ids(json.loads(row["result"])))
         out = summarize(db, sid, alts)
-        out["matched"] = {"name": pick["title"], "about": pick["subtitle"], "provider": pick["provider"], "kind": what}
+        out["matched"] = {"name": pick["title"], "about": pick["subtitle"], "provider": pick["provider"], "kind": WHAT[kind]}
         if kind != "artist":
-            out["searched_for"] = {"kind": what, "title": pick["title"], "about": pick["subtitle"]}
+            out["searched_for"] = {"kind": WHAT[kind], "title": pick["title"], "about": pick["subtitle"]}
         return out
     finally:
         await http.close()
