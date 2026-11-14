@@ -195,6 +195,25 @@ CREATE TABLE IF NOT EXISTS session_tracks (
     UNIQUE(session_id, track_id, via_entity_id)
 );
 
+-- Step 2: people expanded from the network graph of a research session. Their own collaborators
+-- are added to the session (session_tracks.degree = 3, via_entity_id = the expanded person).
+CREATE TABLE IF NOT EXISTS session_expansions (
+    session_id INTEGER NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
+    entity_id INTEGER NOT NULL,
+    status TEXT NOT NULL,            -- running | done | failed
+    tracks INTEGER NOT NULL DEFAULT 0,
+    requested_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(session_id, entity_id)
+);
+
+-- When two entities are merged, ids stored inside saved research results keep pointing at the
+-- removed one. This maps them to the surviving entity.
+CREATE TABLE IF NOT EXISTS entity_redirects (
+    old_id INTEGER PRIMARY KEY,
+    new_id INTEGER NOT NULL
+);
+
 -- Personal CRM (Step 3 builds on this; Step 1 already lets you save people)
 CREATE TABLE IF NOT EXISTS saved_people (
     entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,

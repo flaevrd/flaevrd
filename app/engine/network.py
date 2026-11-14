@@ -391,3 +391,44 @@ def graph(s: Scope, root: int, direct: list[dict], second: list[dict], max_direc
             edges.append({"source": p["via_id"], "target": y["id"], "kind": "indirect", "strength": p["strength"],
                           "label": p["type"], "text": p["explanation"]})
     return {"nodes": nodes, "edges": edges, "center": center}
+
+
+def add_expansions(s: Scope, g: dict, expanded: list[int], per_node: int = 15) -> list[dict]:
+    """Step 2: grow the graph around people the user expanded. Each expanded person's own
+    collaborators (from every credit collected for them) are added as new nodes, one ring further
+    out, and links to people already in the graph are drawn too, so clusters become visible.
+    Returns one relationship row per added person (evidence included) for the side panel."""
+    if not g:
+        return []
+    nodes = {n["id"]: n for n in g["nodes"]}
+    pairs = {frozenset((e["source"], e["target"])) for e in g["edges"]}
+    rows = []
+    for x in expanded:
+        if x not in nodes or x not in s.entities:
+            continue
+        nodes[x]["expanded"] = True
+        added = 0
+        for d in direct_network(s, x):
+            y = d["id"]
+            if y == x:
+                continue
+            key = frozenset((x, y))
+            if y not in nodes:
+                if added >= per_node or d["type"] not in PERSONLIKE:
+                    continue
+                ent = s.entities[y]
+                n = {"id": y, "label": d["name"], "type": d["type"], "group": d["group"],
+                     "degree": min(3, nodes[x]["degree"] + 1), "strength": d["strength"],
+                     "location": ent.get("location") or ent.get("country"), "genres": ent.get("genres", []),
+                     "expanded_from": x}
+                nodes[y] = n
+                g["nodes"].append(n)
+                added += 1
+                rows.append({**d, "degree": n["degree"], "via_id": x, "via_name": s.entities[x]["name"],
+                             "evidence": d["evidence"][:6]})
+            if key in pairs:
+                continue
+            pairs.add(key)
+            g["edges"].append({"source": x, "target": y, "kind": "expanded", "strength": d["strength"],
+                               "label": d["relationship"], "text": f"{d['summary']}. {d['why']}."})
+    return rows

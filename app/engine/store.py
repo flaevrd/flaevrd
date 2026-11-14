@@ -113,6 +113,10 @@ class Store:
             db.x("UPDATE OR IGNORE session_tracks SET via_entity_id=? WHERE via_entity_id=?", (keep, drop))
             db.x("DELETE FROM session_tracks WHERE via_entity_id=?", (drop,))
             db.x("UPDATE research_sessions SET root_entity_id=? WHERE root_entity_id=?", (keep, drop))
+            db.x("UPDATE OR IGNORE session_expansions SET entity_id=? WHERE entity_id=?", (keep, drop))
+            db.x("DELETE FROM session_expansions WHERE entity_id=?", (drop,))
+            db.x("UPDATE entity_redirects SET new_id=? WHERE new_id=?", (keep, drop))
+            db.x("INSERT OR REPLACE INTO entity_redirects(old_id,new_id) VALUES(?,?)", (drop, keep))
             db.x("DELETE FROM identity_questions WHERE (a_id=? AND b_id=?) OR (a_id=? AND b_id=?)",
                  (keep, drop, drop, keep))
             db.x("UPDATE OR IGNORE identity_questions SET a_id=? WHERE a_id=?", (keep, drop))
