@@ -253,6 +253,7 @@ async def choose(r: Researcher, q: str, kind: str) -> tuple[dict | None, list[di
     every alternative is returned so the page can show 'meant something else?'."""
     nq = norm_name(q)
     dashed = bool(split_query(q)[1])
+    sq = lambda t: re.sub(r"[^a-z0-9]", "", (t or "").lower())  # 'The Kid LAROI' == 'thekidlaroi'
 
     def first(cands, k, prefer_genius=False):
         lst = [c for c in cands if c["kind"] == k]
@@ -268,10 +269,17 @@ async def choose(r: Researcher, q: str, kind: str) -> tuple[dict | None, list[di
         return (lst[0] if lst else None), [_alt(c) for c in lst[1:6]]
 
     artists = [] if dashed else first((await r.suggest(q, "artist"))["candidates"], "artist")
+    if not dashed and r.discogs.configured():
+        # Discogs lists many smaller producers and engineers that MusicBrainz and Genius don't have
+        found = await r._safe(None, "Discogs artists", r.discogs.search(q, "artist"), []) or []
+        have = {sq(c["title"]) for c in artists}
+        for c in found:
+            d = dict(c.__dict__, external_id=c.external_id.split(":")[-1], subtitle=c.subtitle or "Discogs artist")
+            if sq(d["title"]) == sq(q) or sq(d["title"]) not in have:
+                artists.append(d)
     res = await r.suggest(q, "auto")
     songs, albums = first(res["candidates"], "song", not dashed), first(res["candidates"], "album")
-    sq = lambda t: re.sub(r"[^a-z0-9]", "", (t or "").lower())
-    exact = [c for c in artists if norm_name(c["title"]) == nq]
+    exact = [c for c in artists if norm_name(c["title"]) == nq or sq(c["title"]) == sq(q)]
     exact_work = [c for c in albums + songs if sq(c["title"]) == sq(q)]
     if exact:
         pick = exact[0]
@@ -283,14 +291,16 @@ async def choose(r: Researcher, q: str, kind: str) -> tuple[dict | None, list[di
     elif exact_work:
         pick = exact_work[0]
     else:
-        pick = (artists or songs or albums or [None])[0]
-    if pick is None:
-        return None, []
+        pick = None  # nothing matches the name: never research a loose match as if it were the person
     near = lambda c: sq(q) in sq(c["title"]) or sq(c["title"]) in sq(q)  # drop loose matches nobody meant
+    if pick is None:
+        return None, [_alt(c) for c in (artists[:4] + songs[:2] + albums[:1])]
     others = ([c for c in artists if c is not pick and near(c)][:3] + [c for c in songs if c is not pick and near(c)][:2]
               + [c for c in albums if c is not pick and near(c)][:2])
     if pick["kind"] != "artist":
         others.sort(key=lambda c: c["kind"] != pick["kind"])
+    # the same name on Genius is the same person (research links it by name); it is not a different reading
+    others = [c for c in others if not (c["kind"] == "artist" and c["provider"] == "genius" and sq(c["title"]) == sq(pick["title"]))]
     return pick, [_alt(c) for c in others]
 
 
@@ -314,7 +324,11 @@ async def lookup(query: str, depth: int | None = None) -> dict:
             pick, alts = await choose(r, q, kind)
         if pick is None:
             what = "person, song or album" if kind == "auto" else WHAT[kind]
-            return {"error": f"No {what} called “{q}” was found in MusicBrainz or Genius."}
+            if alts:  # saved as a result (not an error) so the page can offer the closest names to click
+                return {"not_found": True, "searched": q, "alternatives": alts,
+                        "message": f"No {what} called “{q}” is listed in MusicBrainz, Genius or Discogs."}
+            return {"error": f"No {what} called “{q}” is listed in MusicBrainz, Genius or Discogs. These databases only know "
+                             f"people with credited releases, so smaller producers are often missing."}
         kind = pick["kind"]
         sid = r.start(pick["title"], kind, pick["provider"], pick["external_id"], depth)
         await r.jobs[sid]
